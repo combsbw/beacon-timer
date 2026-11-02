@@ -14,7 +14,8 @@ sketch with core 2.0.17 and runs the engine tests. Open the run on the **Actions
 - `beacon-timer.full.bin` - a complete image (bootloader + partitions + app) to flash at address 0x0 with a web
   flasher (Chrome/Edge, over USB), for the very first install.
 
-Push a tag such as `v0.3.0` (`git tag v0.3.0 && git push --tags`) and the same files are attached to a GitHub release.
+Every push to `main` also refreshes the **Releases > Latest build** page, where both `.bin` files are separate
+downloads (no tags to create).
 The repository folder must be named `beacon-timer` (the sketch name) when built locally.
 
 ## Build and flash
