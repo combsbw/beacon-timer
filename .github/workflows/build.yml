@@ -36,9 +36,18 @@ jobs:
 
       - name: Collect binaries
         run: |
+          ls -l build
           mkdir -p dist
           cp build/beacon-timer.ino.bin dist/beacon-timer.ota.bin
-          cp build/beacon-timer.ino.merged.bin dist/beacon-timer.full.bin
+          # one image for a first USB flash at address 0x0: bootloader + partition table + boot_app0 + app
+          pip install --quiet esptool
+          BOOT_APP0=$(find ~/.arduino15/packages/esp32/hardware/esp32/2.0.17/tools/partitions -name boot_app0.bin | head -1)
+          python3 -m esptool --chip esp32s3 merge_bin -o dist/beacon-timer.full.bin \
+            --flash_mode keep --flash_freq keep --flash_size keep \
+            0x0 build/beacon-timer.ino.bootloader.bin \
+            0x8000 build/beacon-timer.ino.partitions.bin \
+            0xe000 "$BOOT_APP0" \
+            0x10000 build/beacon-timer.ino.bin
           ls -l dist
 
       - uses: actions/upload-artifact@v4
