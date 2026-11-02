@@ -1,16 +1,16 @@
 name: Build firmware
 
 # Compiles the sketch with the pinned ESP32 core (2.0.17) for the ESP32-S3, runs the host tests of the timer engine,
-# and keeps the .bin files as a downloadable artifact. Push a tag like v0.3.0 to also publish them as a release.
+# and keeps the .bin files as a downloadable artifact. Every push to main also refreshes the "latest" release, so the
+# newest .bin files are always one click away on the Releases page (no tags to manage).
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write      # only used to refresh the "latest" release
 
 jobs:
   build:
@@ -55,10 +55,12 @@ jobs:
           name: beacon-timer-firmware
           path: dist/*.bin
 
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.bin
+      - name: Refresh the "latest" release (main only)
+        if: github.ref == 'refs/heads/main'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/*.bin --target "$GITHUB_SHA" --latest \
+            --title "Latest build" \
+            --notes "Built from commit ${GITHUB_SHA::7}. beacon-timer.ota.bin = update through the page (Settings > Device); beacon-timer.full.bin = first USB flash at 0x0."
