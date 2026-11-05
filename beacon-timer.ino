@@ -44,7 +44,7 @@
 #include "ghupdate.h"
 #include "tlshttps.h"
 
-#define FW_VERSION "0.5.1"
+#define FW_VERSION "0.5.2"
 #define IDLE_SLEEP_MS (5UL * 60UL * 1000UL)   // home-network mode: sleep this long after the session stops
 #define STA_JOIN_MS 15000
 #define AP_SSID "Beacon-timer"          // open network, no password

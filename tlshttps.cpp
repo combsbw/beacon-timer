@@ -377,9 +377,41 @@ static esp_err_t proxyReq(httpd_req_t* req) {
     p = nl + 2;
   }
 
+  /* The home-screen icon is fetched by a separate iOS process. It keeps a picture only when the
+     response has Content-Length. Chunked pictures become the letter icon. The page itself is fine either way. */
   bool headOnly = req->method == HTTP_HEAD;
+  if (req->uri && strstr(req->uri, ".png")) httpd_resp_set_type(req, "image/png");
   if (headOnly || bodyLen == 0) {
     httpd_resp_send(req, "", 0);
+  } else if (bodyLen > 0 && bodyLen <= 65536) {
+    uint8_t* body = (uint8_t*)malloc((size_t)bodyLen);
+    size_t got = 0;
+    while (body && got < (size_t)bodyLen) {
+      if (!client.available()) {
+        if (!client.connected() || (int32_t)(millis() - deadline) >= 0) break;
+        delay(2);
+        continue;
+      }
+      int n = client.read(body + got, (size_t)bodyLen - got);
+      if (n <= 0) break;
+      got += (size_t)n;
+      deadline = millis() + 15000;
+    }
+    if (!body || got != (size_t)bodyLen) {
+      free(body);
+      free(hdr);
+      free(buf);
+      client.stop();
+      return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "short response");
+    }
+    esp_err_t sent = httpd_resp_send(req, (const char*)body, (ssize_t)bodyLen);
+    free(body);
+    if (sent != ESP_OK) {
+      free(hdr);
+      free(buf);
+      client.stop();
+      return ESP_FAIL;
+    }
   } else {
     size_t remain = bodyLen > 0 ? (size_t)bodyLen : (size_t)-1;
     while (remain) {
