@@ -69,7 +69,11 @@ pages: docs/index.html
 
 ui: webui.h pages
 
-build: webui.h icons.h
+# Server-certificate dates. Regenerated every build; the authority on the board stays put.
+certwindow.h: tools/cert_window.py
+	python3 tools/cert_window.py
+
+build: webui.h icons.h certwindow.h
 	$(CLI) compile --fqbn $(FQBN) --output-dir $(BUILD) .
 
 flash: build

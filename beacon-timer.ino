@@ -4,6 +4,7 @@
  *   Board   : esp32:esp32:esp32s3  (arduino-esp32 core 2.0.17), USB CDC On Boot = enabled
  *   Wi-Fi   : open soft AP "Beacon-timer"  ->  http://192.168.4.1  (captive portal opens the page by itself)
  *             or, after Device > Network, the home network saved for online update -> http://beacon-timer.local
+ *             and https://beacon-timer.local once the phone trusts the board's certificate (tlshttps.cpp)
  *   Sleep   : home-network mode only. LEDs off and Wi-Fi modem sleep after 5 min idle, or when the page asks.
  *             A wake request (or starting a session) brings the radio and LEDs back. The AP never sleeps.
  *   Update  : ArduinoOTA on port 3232 ("make ota") and an HTTP upload from the Settings > Device page
@@ -41,8 +42,9 @@
 #include "webui.h"
 #include "icons.h"
 #include "ghupdate.h"
+#include "tlshttps.h"
 
-#define FW_VERSION "0.4.0"
+#define FW_VERSION "0.5.0"
 #define IDLE_SLEEP_MS (5UL * 60UL * 1000UL)   // home-network mode: sleep this long after the session stops
 #define STA_JOIN_MS 15000
 #define AP_SSID "Beacon-timer"          // open network, no password
@@ -368,7 +370,78 @@ static void handleManifest() {
   server.send(200, "application/manifest+json",
               "{\"name\":\"Beacon Timer\",\"short_name\":\"Beacon\",\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\","
               "\"orientation\":\"any\",\"background_color\":\"#0b0e10\",\"theme_color\":\"#0b0e10\","
-              "\"icons\":[{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}");
+              "\"icons\":[{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\",\"purpose\":\"any\"},"
+              "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}");
+}
+
+// The home-screen icon loads this when the board is off. API calls stay on the network.
+static void handleSw() {
+  char body[2200];
+  snprintf(body, sizeof body,
+    "var CACHE='%s';\n"
+    "var SHELL=['/','/manifest.webmanifest','/apple-touch-icon.png','/icon-192.png'];\n"
+    "self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});\n"
+    "self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(keys){return Promise.all(keys.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});\n"
+    "self.addEventListener('fetch',function(e){\n"
+    "if(e.request.method!=='GET')return;\n"
+    "var u=new URL(e.request.url);\n"
+    "if(u.origin!==self.location.origin)return;\n"
+    "if(u.pathname.indexOf('/api/')===0||u.pathname==='/update'||u.pathname==='/sw.js'||u.pathname.indexOf('/beacon')===0)return;\n"
+    "var shell=SHELL.indexOf(u.pathname)>=0;\n"
+    "if(!shell&&e.request.mode!=='navigate')return;\n"
+    "e.respondWith(caches.match(shell?e.request:'/').then(function(hit){\n"
+    "var net=fetch(e.request).then(function(res){if(res&&res.ok&&(shell||e.request.mode==='navigate')){var copy=res.clone();caches.open(CACHE).then(function(c){c.put(e.request.mode==='navigate'?'/':e.request,copy);});}return res;}).catch(function(){return hit||caches.match('/');});\n"
+    "return hit||net;}));});\n",
+    WEBUI_CACHE_ID);
+  server.sendHeader("Cache-Control", "no-cache");
+  server.send(200, "application/javascript", body);
+}
+
+// iPhone installs this from http:// first. Trust is a separate switch the page explains.
+static String pemBody(const String& pem) {
+  String o;
+  int i = 0;
+  while (i < (int)pem.length()) {
+    int j = pem.indexOf('\n', i);
+    if (j < 0) j = pem.length();
+    String line = pem.substring(i, j);
+    line.trim();
+    if (line.length() && line.indexOf("BEGIN ") < 0 && line.indexOf("END ") < 0) o += line;
+    i = j + 1;
+  }
+  return o;
+}
+
+static void handleCertProfile() {
+  if (!fsOk || !LittleFS.exists("/ca.crt")) { server.send(503, "text/plain", "certificate not ready"); return; }
+  File f = LittleFS.open("/ca.crt", "r");
+  if (!f) { server.send(503, "text/plain", "certificate not ready"); return; }
+  String b64 = pemBody(f.readString());
+  f.close();
+  if (!b64.length()) { server.send(500, "text/plain", "certificate unreadable"); return; }
+  String xml;
+  xml.reserve(b64.length() + 900);
+  xml += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  xml += "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+  xml += "<plist version=\"1.0\"><dict><key>PayloadContent</key><array><dict>";
+  xml += "<key>PayloadCertificateFileName</key><string>beacon-timer.cer</string>";
+  xml += "<key>PayloadContent</key><data>";
+  xml += b64;
+  xml += "</data><key>PayloadDescription</key><string>Beacon Timer local certificate</string>";
+  xml += "<key>PayloadDisplayName</key><string>Beacon Timer</string>";
+  xml += "<key>PayloadIdentifier</key><string>local.beacon-timer.ca</string>";
+  xml += "<key>PayloadType</key><string>com.apple.security.root</string>";
+  xml += "<key>PayloadUUID</key><string>6f1c2a90-4b3e-4d77-9a10-000000000001</string>";
+  xml += "<key>PayloadVersion</key><integer>1</integer></dict></array>";
+  xml += "<key>PayloadDisplayName</key><string>Beacon Timer</string>";
+  xml += "<key>PayloadIdentifier</key><string>local.beacon-timer.profile</string>";
+  xml += "<key>PayloadRemovalDisallowed</key><false/>";
+  xml += "<key>PayloadType</key><string>Configuration</string>";
+  xml += "<key>PayloadUUID</key><string>6f1c2a90-4b3e-4d77-9a10-000000000002</string>";
+  xml += "<key>PayloadVersion</key><integer>1</integer></dict></plist>\n";
+  server.sendHeader("Content-Disposition", "attachment; filename=\"beacon-timer.mobileconfig\"");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/x-apple-aspen-config", xml);
 }
 
 // Saved timers. The page keeps the list (name + settings of each); the board only stores it, so every phone sees the same list.
@@ -499,6 +572,7 @@ static void runWebUpdate() {
   if (powerSave) leaveSleep();          // the LED task is parked while asleep, and the update pattern has to be visible
   Serial.println("online update: joining Wi-Fi");
 
+  tlsStop();
   server.stop();
 #if CAPTIVE_PORTAL
   if (dnsOn) { dns.stop(); dnsOn = false; }
@@ -724,6 +798,7 @@ void setup() {
   }
   if (!radioSta) startAp();
   else if (MDNS.begin(HOST_NAME)) MDNS.addService("http", "tcp", 80);
+  if (fsOk) tlsPrepare();
   idleSinceMs = millis();
 
   server.on("/", HTTP_GET, handleRoot);
@@ -732,6 +807,8 @@ void setup() {
   server.on("/icon-192.png", HTTP_GET, handleIcon192);
   server.on("/favicon.ico", HTTP_GET, handleIcon192);
   server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
+  server.on("/sw.js", HTTP_GET, handleSw);
+  server.on("/beacon.mobileconfig", HTTP_GET, handleCertProfile);
   server.on("/api/state", HTTP_GET, sendState);
   server.on("/api/net", HTTP_GET, handleNetInfo);
   server.on("/api/net", HTTP_POST, handleNetPost);
@@ -749,6 +826,7 @@ void setup() {
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateData);
   server.onNotFound(handleNotFound);
   server.begin();
+  if (radioSta && tlsStart()) MDNS.addService("https", "tcp", 443);
 
   ArduinoOTA.setHostname(HOST_NAME);
   ArduinoOTA.setPort(OTA_PORT);
@@ -758,7 +836,7 @@ void setup() {
   ArduinoOTA.begin();
 
   Serial.printf("Beacon Timer %s\n", FW_VERSION);
-  if (radioSta) Serial.printf("STA http://%s  http://%s.local  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, OTA_PORT);
+  if (radioSta) Serial.printf("STA http://%s  http://%s.local  https://%s.local  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, HOST_NAME, OTA_PORT);
   else Serial.printf("AP \"%s\" (open)  http://%s  OTA port %d%s\n", AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_PORT, staFailed ? "  (home Wi-Fi join failed)" : "");
 }
 
