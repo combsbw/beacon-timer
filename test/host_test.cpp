@@ -144,28 +144,38 @@ static int stateTest() {
     CHECK(fabsf(led1(sc, Win{W_LOAD, 1, 1, 30.0, 0.0}, 1.0).b - pulseLed(sc.load, 30.0, 1.0, sc.maxHz).b) < 1e-6f);
   }
 
-  // long loads: paced rates (pulses per minute), a steady stretch before the ramp, time marks
+  // long loads: slow pulses through the colors, then the normal accelerating sequence in the last 30 s
   {
     Config lc; lc.setDefaults();
-    lc.load.paced = true; lc.load.pace0 = 6; lc.load.pace1 = 60; lc.load.rampAt = 40; lc.load.markEvery = 60;
-    lc.load.solid = 3; lc.load.fade = 1;
-    Win w{W_LOAD, 1, 1, 1200.0, 0.0};
-    Accel steady = accelOf(0.3 * 1200.0, 1200.0, 0.1, 1.0, 3, 0.4);       // inside the first 40%: constant starting rate
-    CHECK(steady.q == 0.f && fabs(steady.cyc - 0.1 * 360.0) < 1e-9);
-    Accel end = accelOf(1200.0, 1200.0, 0.1, 1.0, 3, 0.4);                 // closed form: 0.1*1200 + 0.9 * 720/4
-    CHECK(fabs(end.cyc - (120.0 + 0.9 * 720.0 / 4.0)) < 1e-9 && end.q == 1.f);
-    CHECK(led1(lc, w, 60.05).b == 1.f);                                    // first mark: flash, gap, flash, dark
-    CHECK(led1(lc, w, 60.2).b == 0.f && led1(lc, w, 60.3).b == 1.f && led1(lc, w, 60.45).b == 0.f);
-    CHECK(led1(lc, w, 120.05).b == 1.f);
-    CHECK(led1(lc, w, 30.1).b == pulseLed(lc.load, 1200.0, 30.1, lc.maxHz).b);      // no mark before the first interval
-    CHECK(led1(lc, w, 1199.0).b == pulseLed(lc.load, 1200.0, 1199.0, lc.maxHz).b);
-    Config nm = lc; nm.load.markEvery = 0;
-    CHECK(led1(nm, w, 60.2).b == pulseLed(nm.load, 1200.0, 60.2, nm.maxHz).b);
-    // pulse rate follows pulses per minute: 6/min = one pulse per 10 s while steady
-    Config pc; pc.setDefaults(); pc.load.paced = true; pc.load.solid = 0; pc.load.fade = 0; pc.load.markEvery = 0; pc.load.glow = 0;
-    pc.load.duty0 = pc.load.duty1 = 50; pc.load.soft0 = pc.load.soft1 = 100; pc.load.rampAt = 90;
-    Led lit = led1(pc, w, 2.5), dark = led1(pc, w, 7.5);                   // 2.5 s = 25% of a 10 s cycle (lit), 7.5 s = 75% (dark)
-    CHECK(lit.b > 0.9f && dark.b < 0.05f);
+    lc.load.glow = 0; lc.load.solid = 0; lc.load.fade = 0; lc.load.blend = 0;
+    Win w{W_LOAD, 1, 1, 600.0, 0.0};                                       // 10 min, 4 colors: 4 shares of 142.5 s, then the last 30 s
+    Led a = led1(lc, w, 10.0), b = led1(lc, w, 150.0), c = led1(lc, w, 300.0), d = led1(lc, w, 430.0), e = led1(lc, w, 569.0);
+    CHECK(a.c.g == lc.load.colors[0].g && a.c.r == lc.load.colors[0].r);
+    CHECK(b.c.r == lc.load.colors[1].r && b.c.g == lc.load.colors[1].g);
+    CHECK(c.c.r == lc.load.colors[2].r && c.c.g == lc.load.colors[2].g);
+    CHECK(d.c.r == lc.load.colors[3].r && d.c.g == lc.load.colors[3].g);
+    CHECK(e.c.r == lc.load.colors[3].r && e.c.g == lc.load.colors[3].g);   // still the long part's last share
+    Led f = led1(lc, w, 570.5);                                            // final 30 s start again at the first color
+    CHECK(f.c.r == lc.load.colors[0].r && f.c.g == lc.load.colors[0].g);
+    // the slow pulse: cycle 4 s, peak at the start of each cycle, dim level 15 %
+    CHECK(fabsf(led1(lc, w, 8.0).b - 1.f) < 1e-5f && fabsf(led1(lc, w, 10.0).b - 0.15f) < 1e-5f && led1(lc, w, 9.0).b > 0.4f);
+    // the last 30 s are exactly a plain 30 s load
+    Win w30{W_LOAD, 1, 1, 30.0, 0.0};
+    for (double t = 0.3; t < 30.0; t += 1.7) {
+      Led p1 = led1(lc, w, 570.0 + t), p2 = led1(lc, w30, t);
+      CHECK(fabsf(p1.b - p2.b) < 1e-6f && p1.c.r == p2.c.r && p1.c.g == p2.c.g && p1.c.b == p2.c.b);
+    }
+    // a load of 30 s or less is untouched; the final length is adjustable
+    Win w20{W_LOAD, 1, 1, 20.0, 0.0};
+    CHECK(fabsf(led1(lc, w20, 5.0).b - pulseLed(lc.load, 20.0, 5.0, lc.maxHz).b) < 1e-9f);
+    Config fc = lc; fc.load.finalSec = 60;
+    Led g = led1(fc, w, 539.0), h = led1(fc, w, 541.0);                    // the ramp now starts 60 s before the end
+    CHECK(g.c.r == fc.load.colors[3].r && h.c.r == fc.load.colors[0].r);
+    // time marks only inside the long part
+    Config mc = lc; mc.load.markEvery = 60;
+    CHECK(led1(mc, w, 60.05).b == 1.f && led1(mc, w, 60.2).b == 0.f && led1(mc, w, 60.3).b == 1.f && led1(mc, w, 60.45).b == 0.f);
+    CHECK(led1(mc, w, 30.1).b == led1(lc, w, 30.1).b);                     // none before the first interval
+    CHECK(led1(mc, w, 570.1).b == led1(lc, w, 570.1).b && led1(mc, w, 599.0).b == led1(lc, w, 599.0).b);   // none in the final stretch
   }
 
   // LED 2 follows the repeat when asked
@@ -188,11 +198,20 @@ static int stateTest() {
     Led sb = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, sc);
     CHECK(sb.c.r == sc[2].r && sb.c.g == sc[2].g);
     Config pj; bool ok3 = true;
-    const char* jt = "{\"trackRepeats\":true,\"loadSec\":5000,\"profiles\":{\"load\":{\"paced\":true,\"pace0\":0,\"pace1\":900,\"rampAt\":95,\"markEvery\":5}}}";
-    CHECK(cfgFromJson(jt, strlen(jt), pj, &ok3) && pj.trackRepeats && pj.loadSec == 1200.f && pj.load.paced && pj.load.pace0 == 1.f &&
-          pj.load.pace1 == 300.f && pj.load.rampAt == 90.f && pj.load.markEvery == 10.f);
+    const char* jt = "{\"trackRepeats\":true,\"loadSec\":5000,\"profiles\":{\"load\":{\"final\":500,\"longCycle\":0,\"longDim\":99,\"markEvery\":5}}}";
+    CHECK(cfgFromJson(jt, strlen(jt), pj, &ok3) && pj.trackRepeats && pj.loadSec == 1200.f && pj.load.finalSec == 120.f && pj.load.longCycle == 2.f &&
+          pj.load.longDim == 60.f && pj.load.markEvery == 10.f);
     Engine ee; ee.configure(pj);
     CHECK(ee.state == ST_IDLE && ee.plan.total > 1200.0);
+  }
+
+  // saved-timer list validation
+  {
+    const char* ok1 = "[]";
+    const char* ok2 = "[{\"id\":\"k1\",\"name\":\"Run \\\"A\\\"\",\"cfg\":{\"sets\":5,\"profiles\":{\"load\":{\"colors\":[\"#22e070\",\"#ffd51a\"],\"final\":30}}}}]";
+    CHECK(presetsJsonOk(ok1, strlen(ok1)) && presetsJsonOk(ok2, strlen(ok2)));
+    const char* bad[] = {"", "{}", "[{\"id\":1,", "[1,2", "not json", "[{\"a\":}]"};
+    for (const char* b : bad) CHECK(!presetsJsonOk(b, strlen(b)));
   }
 
   // settings parser: defaults on {}, clamping, bad pins, bad json

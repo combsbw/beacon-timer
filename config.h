@@ -45,10 +45,9 @@ inline void cfgProfileNum(Profile& p, const char* k, float v) {
   else if (!strcmp(k, "floor")) p.glow = v;
   else if (!strcmp(k, "blend")) p.blend = v;
   else if (!strcmp(k, "solid")) p.solid = v;
-  else if (!strcmp(k, "paced")) p.paced = v != 0.f;
-  else if (!strcmp(k, "pace0")) p.pace0 = v;
-  else if (!strcmp(k, "pace1")) p.pace1 = v;
-  else if (!strcmp(k, "rampAt")) p.rampAt = v;
+  else if (!strcmp(k, "final")) p.finalSec = v;
+  else if (!strcmp(k, "longCycle")) p.longCycle = v;
+  else if (!strcmp(k, "longDim")) p.longDim = v;
   else if (!strcmp(k, "markEvery")) p.markEvery = v;
   else if (!strcmp(k, "fade")) p.fade = v;
   else if (!strcmp(k, "breath")) p.breath = v;
@@ -117,7 +116,7 @@ inline void cfgSanitizeProfile(Profile& p) {
   if (p.curve > 3) p.curve = 3;
   p.duty0 = clampf(p.duty0, 5.f, 95.f); p.duty1 = clampf(p.duty1, 5.f, 95.f);
   p.soft0 = clampf(p.soft0, 0.f, 100.f); p.soft1 = clampf(p.soft1, 0.f, 100.f);
-  p.pace0 = clampf(p.pace0, 1.f, 300.f); p.pace1 = clampf(p.pace1, 1.f, 300.f); p.rampAt = clampf(p.rampAt, 0.f, 90.f);
+  p.finalSec = clampf(p.finalSec, 10.f, 120.f); p.longCycle = clampf(p.longCycle, 2.f, 20.f); p.longDim = clampf(p.longDim, 0.f, 60.f);
   p.markEvery = p.markEvery <= 0.f ? 0.f : clampf(p.markEvery, 10.f, 600.f);
   p.solid = clampf(p.solid, 0.f, 10.f); p.fade = clampf(p.fade, 0.f, 5.f);
   p.glow = clampf(p.glow, 0.f, 100.f); p.blend = clampf(p.blend, 0.f, 100.f);
@@ -181,6 +180,15 @@ inline bool cfgFromJson(const char* json, size_t n, Config& out, bool* pinsOk = 
   }
   if (pinsOk) *pinsOk = ok;
   return true;
+}
+
+// Saved timers are stored on the board as one opaque JSON array (the page owns the content). Only the shape is checked here.
+inline void presetsNoop(void*, const char*, char, double, const char*) {}
+inline bool presetsJsonOk(const char* s, size_t n) {
+  size_t i = 0;
+  while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+  if (i >= n || s[i] != '[') return false;
+  return jsonWalk(s, n, presetsNoop, nullptr);
 }
 
 }  // namespace bc

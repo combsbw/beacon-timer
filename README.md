@@ -69,6 +69,7 @@ to flash two seconds after the last change.
 | `GET /api/state`          | `{app, ver, s, t, total, rev, ota, up}` — `s` is idle / run / pause / preview / done / stopped |
 | `POST /api/cmd?c=start&t=` | `c` = start (optional `t` seconds), pause, stop, reset, seek (needs `t`) |
 | `GET/POST /api/config`    | The settings JSON (POST body is plain text); `rev` changes when it does |
+| `GET/POST /api/presets`   | The saved-timer list (one JSON array, up to 32 kB), kept in LittleFS      |
 | `POST /api/reboot`        | Restart                                                                 |
 | `POST /update`            | Multipart firmware upload (field `firmware`), reboots when done         |
 
@@ -93,11 +94,19 @@ whole session is 15 s + 4 x 5 x (30 + 2 + 15) s - 15 s = 15:40.
   it one color per repeat, so it stays one color for a whole pass and changes when the next repeat begins (the closing
   transition already shows the next repeat's color). The caption under the LED reads SET or REPEAT.
 - **Loads up to 20 minutes.** The Load length steps in 5 s (under 2 min), 15 s (2-5 min) and 30 s (over 5 min); type a
-  value for anything exact. Times of an hour or more read h:mm:ss. Under Settings > Load:
-  - *Rate per Window / Minute*: Window keeps the old behaviour (pulses per window); Minute sets the rate in pulses per
-    minute (start and end), so a 20-minute load is not stuck with one pulse every couple of minutes.
-  - *Steady*: keep the starting rate for the first part of the window (in %), then ramp up for the rest.
-  - *Time marks*: a quick double flash every N seconds (10-600), so you can tell how far along a long load is. Off by default.
+  value for anything exact. Times of an hour or more read h:mm:ss.
+- **Long-load lighting** (Settings > Load > Long loads). Only the last *Final* seconds (30 by default) run the accelerating
+  pulse. Before that the light pulses slowly (*Cycle*, *Dim*), one color after another, each color getting an equal share
+  of the time; the final stretch then starts again at the first color. A 10 min load with 4 colors is 4 shares of 2:22.5,
+  then the last 30 s. Loads of 30 s or less behave as before. *Marks* adds an optional double flash every N seconds.
+
+## Saved timers
+
+Settings > **Saved timers**: type a name and tap **Save** to store the current timing, names and light settings. Tap a
+saved timer to load it; the buttons on each row update it with the current settings, rename it, or delete it (update and
+delete ask for a second tap). Up to 20 are kept. Pins, brightness limits and the hide-LEDs switch are not part of a saved
+timer, so loading one never changes the wiring settings. On the board the list is stored in its flash (LittleFS), so every
+phone sees the same list; in a plain browser it is kept in that browser.
 
 ## Notes
 

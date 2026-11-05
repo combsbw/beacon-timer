@@ -69,13 +69,11 @@ inline float pulseShape(float x, float duty, float soft) {
 // Accelerating rate f(p) = f0 + (f1 - f0) * p^n. q = p^n is the same curve as a 0..1 share (duty and softness follow it);
 // cyc is the closed-form integral of the rate, i.e. the pulse phase in cycles. No accumulator, so it can be scrubbed.
 struct Accel { float q; double cyc; };
-// `hold` = share of the window that keeps the starting rate before the ramp begins (0 = ramp from the start).
-inline Accel accelOf(double local, double len, double f0, double f1, int n, double hold = 0.0) {
-  double p = clampd(local / len, 0.0, 1.0), u = hold > 0.0 ? clampd((p - hold) / (1.0 - hold), 0.0, 1.0) : p;
-  double pn = pow(u, (double)n), k = len * (1.0 - hold);
+inline Accel accelOf(double local, double len, double f0, double f1, int n) {
+  double p = clampd(local / len, 0.0, 1.0), pn = pow(p, (double)n);
   Accel a;
   a.q = (float)pn;
-  a.cyc = f0 * local + (f1 - f0) * k / (double)(n + 1) * pn * u;
+  a.cyc = f0 * local + (f1 - f0) * len / (double)(n + 1) * pn * p;
   return a;
 }
 
@@ -83,10 +81,9 @@ struct Profile {
   float rate0, rate1;          // pulses per window at the start and end (load)
   int curve;                   // 1 linear, 2 squared, 3 cubic
   float duty0, duty1, soft0, soft1;   // percent
-  bool paced;                  // load: rates are pulses per minute (pace0/pace1) instead of pulses per window (rate0/rate1)
-  float pace0, pace1;          // pulses per minute
-  float rampAt;                // percent of the window that keeps the starting rate before the ramp begins
-  float markEvery;             // seconds between time-mark double flashes (0 = off)
+  float finalSec;              // load: the last finalSec seconds run the accelerating pulse; a longer load pulses slowly through the colors before that
+  float longCycle, longDim;    // load, long part: slow pulse cycle (s) and its dim level (percent)
+  float markEvery;             // load, long part: seconds between time-mark double flashes (0 = off)
   float solid, fade;           // load: seconds of solid first color at the start of the window, then the fade into the pulses
   float glow;                  // percent, the dim level between pulses ("floor" in the UI)
   float blend;                 // percent, color crossfade
@@ -126,7 +123,7 @@ struct Config {
     Profile l;
     memset(&l, 0, sizeof l);
     l.rate0 = 10; l.rate1 = 150; l.curve = 3; l.duty0 = 60; l.duty1 = 30; l.soft0 = 100; l.soft1 = 0;
-    l.solid = 3; l.fade = 1; l.paced = false; l.pace0 = 6; l.pace1 = 60; l.rampAt = 0; l.markEvery = 0; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
+    l.solid = 3; l.fade = 1; l.finalSec = 30; l.longCycle = 4; l.longDim = 15; l.markEvery = 0; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
     l.nColors = 4; l.colors[0] = hex(0x22e070); l.colors[1] = hex(0xffd51a); l.colors[2] = hex(0xff7a14); l.colors[3] = hex(0xff1f2d);
     load = l;
     trans = transDefaults();
@@ -242,23 +239,39 @@ inline void setColors(int N, Rgb* out) {
 // ---- LED outputs --------------------------------------------------------------------------------------------------
 struct Led { Rgb c; float b; };    // color 0..255 per channel, brightness 0..1
 
+// Load window. The last finalSec seconds (30 by default; the whole window when it is shorter) run the accelerating pulse and
+// step through the colors. A longer load pulses slowly before that, one color after another, each getting an equal share
+// of the time; the final stretch then starts again at the first color.
 inline Led pulseLed(const Profile& pr, double len, double local, float maxHz) {
-  float p = (float)(local / len);
-  double f0 = fmin(pr.paced ? (double)pr.pace0 / 60.0 : (double)pr.rate0 / len, (double)maxHz);
-  double f1 = fmin(pr.paced ? (double)pr.pace1 / 60.0 : (double)pr.rate1 / len, (double)maxHz);
-  Accel a = accelOf(local, len, f0, f1, pr.curve, (double)pr.rampAt / 100.0);
-  float x = (float)(a.cyc - floor(a.cyc));
-  float w = pulseShape(x, lerpf(pr.duty0, pr.duty1, a.q) / 100.f, lerpf(pr.soft0, pr.soft1, a.q) / 100.f);
-  float fl = pr.glow / 100.f, b = fl + (1.f - fl) * w;
-  float S = (float)fmin((double)pr.solid, len * 0.5), F = (float)fmin((double)pr.fade, len * 0.25);
-  if (local < S) b = 1.f;                                    // solid start, then it fades out into the pulses (which run on the window clock)
-  else if (local < S + F) b = 1.f + (b - 1.f) * smoothf(S, S + F, (float)local);
-  // time marks: a quick double flash every markEvery seconds, so a long window still tells you how far along you are
-  if (pr.markEvery > 0.f && local >= (double)pr.markEvery && len - local >= 2.0) {
+  double F = fmin((double)pr.finalSec, len), head = len - F;
+  int K = pr.nColors;
+  Rgb c;
+  float b;
+  if (local < head) {
+    double seg = head / (double)K;
+    float w = (float)fmin((double)pr.blend / 100.0, 3.0 / seg);                // colors change at once, with at most a 3 s crossfade
+    c = gradientAt(pr.colors, K, (float)(local / head), w);
+    float dim = pr.longDim / 100.f;
+    b = dim + (1.f - dim) * (0.5f + 0.5f * cosf(TAU_F * (float)(fmod(local, (double)pr.longCycle) / (double)pr.longCycle)));   // starts at the peak
+  } else {
+    double lt = local - head;
+    double f0 = fmin((double)pr.rate0 / F, (double)maxHz), f1 = fmin((double)pr.rate1 / F, (double)maxHz);
+    Accel a = accelOf(lt, F, f0, f1, pr.curve);
+    float x = (float)(a.cyc - floor(a.cyc));
+    float w = pulseShape(x, lerpf(pr.duty0, pr.duty1, a.q) / 100.f, lerpf(pr.soft0, pr.soft1, a.q) / 100.f);
+    float fl = pr.glow / 100.f;
+    b = fl + (1.f - fl) * w;
+    c = gradientAt(pr.colors, K, (float)(lt / F), pr.blend / 100.f);
+  }
+  float S = (float)fmin((double)pr.solid, len * 0.5), Fd = (float)fmin((double)pr.fade, len * 0.25);
+  if (local < S) b = 1.f;                                    // solid start, then it fades out into what follows
+  else if (local < S + Fd) b = 1.f + (b - 1.f) * smoothf(S, S + Fd, (float)local);
+  // time marks (long loads only): a quick double flash every markEvery seconds
+  if (pr.markEvery > 0.f && local >= (double)pr.markEvery && local < head) {
     double m = fmod(local, (double)pr.markEvery);
     if (m < 0.5) b = (m < 0.12 || (m >= 0.25 && m < 0.37)) ? 1.f : 0.f;
   }
-  return Led{gradientAt(pr.colors, pr.nColors, p, pr.blend / 100.f), b};
+  return Led{c, b};
 }
 
 // Transition / lead-in: slow constant breathing, then the last seconds ramp from a slow to a fast pulse.

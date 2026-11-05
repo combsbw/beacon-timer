@@ -24,6 +24,7 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include "driver/gpio.h"
 #include "esp_timer.h"
 
@@ -41,6 +42,8 @@
 #define OTA_PORT 3232
 #define CAPTIVE_PORTAL 1                // answer every DNS name with 192.168.4.1 so phones open the page automatically
 #define CFG_MAX_BYTES 6000
+#define PRESETS_MAX_BYTES 32000          // saved timers: one JSON array in LittleFS (the "spiffs" partition of the default scheme)
+static bool fsOk = false;
 
 // ---- LED PWM ------------------------------------------------------------------------------------------------------
 static const int PWM_FREQ = 5000;
@@ -248,6 +251,32 @@ static void handleManifest() {
               "\"icons\":[{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}");
 }
 
+// Saved timers. The page keeps the list (name + settings of each); the board only stores it, so every phone sees the same list.
+static void handlePresetsGet() {
+  server.sendHeader("Cache-Control", "no-store");
+  if (fsOk && LittleFS.exists("/presets.json")) {
+    File f = LittleFS.open("/presets.json", "r");
+    if (f) { server.streamFile(f, "application/json"); f.close(); return; }
+  }
+  server.send(200, "application/json", "[]");
+}
+static void handlePresetsPost() {
+  if (!fsOk) { sendJson(503, "{\"ok\":false,\"err\":\"no storage\"}"); return; }
+  if (!server.hasArg("plain")) { sendJson(400, "{\"ok\":false,\"err\":\"no body\"}"); return; }
+  const String& body = server.arg("plain");
+  size_t n = body.length();
+  if (n > PRESETS_MAX_BYTES) { sendJson(413, "{\"ok\":false,\"err\":\"too big\"}"); return; }
+  if (!bc::presetsJsonOk(body.c_str(), n)) { sendJson(400, "{\"ok\":false,\"err\":\"bad json\"}"); return; }
+  File f = LittleFS.open("/presets.tmp", "w");                       // write the new list beside the old one, then swap
+  if (!f) { sendJson(500, "{\"ok\":false}"); return; }
+  size_t w = f.write((const uint8_t*)body.c_str(), n);
+  f.close();
+  if (w != n) { LittleFS.remove("/presets.tmp"); sendJson(500, "{\"ok\":false}"); return; }
+  LittleFS.remove("/presets.json");
+  LittleFS.rename("/presets.tmp", "/presets.json");
+  sendJson(200, "{\"ok\":true}");
+}
+
 static void handleReboot() {
   sendJson(200, "{\"ok\":true}");
   rebootAtMs = millis() + 600;
@@ -292,6 +321,7 @@ void setup() {
 
   prefs.begin("beacon", false);
   hw[0].live = hw[1].live = false;
+  fsOk = LittleFS.begin(true);          // formats the storage on the very first boot
   cfgLoad();                            // also sets up the LED pins: common pin held HIGH (anode) so the LEDs start dark
   xTaskCreatePinnedToCore(ledTask, "led", 6144, nullptr, 5, nullptr, 1);
 
@@ -311,6 +341,8 @@ void setup() {
   server.on("/favicon.ico", HTTP_GET, handleIcon192);
   server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
   server.on("/api/state", HTTP_GET, sendState);
+  server.on("/api/presets", HTTP_GET, handlePresetsGet);
+  server.on("/api/presets", HTTP_POST, handlePresetsPost);
   server.on("/api/cmd", HTTP_POST, handleCmd);
   server.on("/api/config", HTTP_GET, handleConfigGet);
   server.on("/api/config", HTTP_POST, handleConfigPost);

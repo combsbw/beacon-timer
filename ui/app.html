@@ -125,6 +125,18 @@ canvas{display:block;width:100%}
 .srow{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px}
 .sl{display:flex;align-items:center;gap:10px;font-weight:500;min-width:0}
 .sl .ic{color:var(--muted)}
+.pbar{display:flex;gap:8px;align-items:center}
+.pbar .rbtn{align-self:auto;flex:none}
+.pbar .txt{flex:1 1 0;min-width:0;width:0}
+.plist{display:flex;flex-direction:column}
+.prow{display:flex;align-items:center;gap:6px;min-height:54px;border-top:1px solid var(--line)}
+.prow:first-child{border-top:0}
+.pload{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:6px 4px;border:0;background:none;color:inherit;font:inherit;text-align:left}
+.pn{display:block;width:0;min-width:100%;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ps{display:block;width:0;min-width:100%;font:400 11px var(--font-mono);color:var(--muted);line-height:1.3;overflow-wrap:anywhere}
+.prow.on .pn::before{content:'';display:inline-block;width:8px;height:8px;margin-right:8px;border-radius:50%;background:var(--ok)}
+.prow .sb.arm{width:auto;border-radius:20px;padding:0 12px;font:600 12px var(--font-ui);background:var(--bad);border-color:var(--bad);color:#fff}
+.prow .txt{flex:1 1 0;min-width:0;width:0}
 .hint{display:block;font:400 11px var(--font-mono);color:var(--muted);line-height:1.1}
 .hint:empty{display:none}
 .step{display:flex;align-items:center;gap:6px;flex:none}
@@ -262,6 +274,10 @@ canvas{display:block;width:100%}
     <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 12c2.5-7 5-7 7.5 0s5 7 7.5 0c1-2.5 2-3.5 3-3.5"/></symbol>
     <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3"/></symbol>
     <symbol id="i-loop" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5zM8 3v6h7V3M8 21v-7h8v7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
     <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 3v18M5 4h12l-2.5 4.5L17 13H5"/></symbol>
     <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
@@ -318,6 +334,18 @@ canvas{display:block;width:100%}
 
     <!-- ========== SETTINGS ========== -->
     <section id="screenSet" role="tabpanel" aria-labelledby="tabS" hidden>
+      <details class="sec" id="sec-presets" open>
+        <summary><svg class="ic"><use href="#i-save"/></svg><span class="st">Saved timers</span><span class="sum" id="sum-presets"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody">
+          <div class="pbar">
+            <input class="txt" id="pName" type="text" maxlength="24" placeholder="Name this timer" aria-label="Name for a new saved timer" enterkeyhint="done">
+            <button class="rbtn" id="pAdd" type="button"><svg class="ic"><use href="#i-plus"/></svg><span>Save</span></button>
+          </div>
+          <div id="pList" class="plist"></div>
+          <p class="note" id="pMsg" aria-live="polite"></p>
+        </div>
+      </details>
+
       <details class="sec" id="sec-timing" open>
         <summary><svg class="ic"><use href="#i-clock"/></svg><span class="st">Timing</span><span class="sum" id="sum-timing"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
         <div class="sbody" id="timingBox"></div>
@@ -433,25 +461,28 @@ const CURVES=[[1,'Linear'],[2,'Squared'],[3,'Cubic']];
 
 /* Accelerating rate: f(p) = f0 + (f1 - f0) * p^n. `q` is the same curve as a 0..1 share, so duty cycle and
    edge softness move along with the rate. `cyc` is the closed-form integral of the rate (pulse phase in cycles). */
-/* a = share of the window that keeps the starting rate before the ramp begins (0 = ramp from the start). Closed form, so it can be scrubbed. */
-function accel(local,len,f0,f1,n,a=0){
-  const p=clamp(local/len,0,1), u=a>0?clamp((p-a)/(1-a),0,1):p, k=len*(1-a);
-  return {q:Math.pow(u,n),cyc:f0*local+(f1-f0)*k/(n+1)*Math.pow(u,n+1)};
+function accel(local,len,f0,f1,n){
+  const p=clamp(local/len,0,1);
+  return {q:Math.pow(p,n),cyc:f0*local+(f1-f0)*len/(n+1)*Math.pow(p,n+1)};
 }
 
-/* Load window: accelerating pulse. Rate, duty cycle and edge softness all run as percentages of the window. */
+/* Load window. The last `final` seconds (30 by default; the whole window when it is shorter) run the accelerating pulse:
+   rate, duty cycle and edge softness all follow one curve and the colors step through the gradient. Anything longer than
+   that is a "long load": before the final stretch the light pulses slowly, one color after another, each color getting an
+   equal share of the time; the final stretch then starts again at the first color. */
 const PULSE={
   schema:[
     {g:'Start of window'},
     {k:'solid',l:'Solid',min:0,max:10,step:0.5,u:' s'},
     {k:'fade',l:'Fade',min:0,max:5,step:0.5,u:' s'},
-    {g:'Rate'},
-    {k:'paced',l:'Per',choice:[[false,'Window'],[true,'Minute']],redo:true},
-    {k:'rate0',l:'Start',min:1,max:60,step:1,u:'',when:p=>!p.paced},
-    {k:'rate1',l:'End',min:2,max:300,step:1,u:'',when:p=>!p.paced},
-    {k:'pace0',l:'Start',min:1,max:300,step:1,u:' /min',when:p=>p.paced},
-    {k:'pace1',l:'End',min:1,max:300,step:1,u:' /min',when:p=>p.paced},
-    {k:'rampAt',l:'Steady',min:0,max:90,step:5,u:'%'},
+    {g:'Long loads'},
+    {k:'final',l:'Final',min:10,max:120,step:5,u:' s'},
+    {k:'longCycle',l:'Cycle',min:2,max:20,step:1,u:' s'},
+    {k:'longDim',l:'Dim',min:0,max:60,step:1,u:'%'},
+    {k:'markEvery',l:'Marks',min:0,max:600,step:10,u:' s',off:'off'},
+    {g:'Rate per final stretch'},
+    {k:'rate0',l:'Start',min:1,max:60,step:1,u:''},
+    {k:'rate1',l:'End',min:2,max:300,step:1,u:''},
     {k:'curve',l:'Curve',choice:CURVES},
     {g:'Duty'},
     {k:'duty0',l:'Start',min:5,max:95,step:1,u:'%'},
@@ -461,26 +492,31 @@ const PULSE={
     {k:'soft1',l:'End',min:0,max:100,step:1,u:'%'},
     {g:'Light'},
     {k:'floor',l:'Glow',min:0,max:40,step:1,u:'%'},
-    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'},
-    {g:'Time marks (long windows)'},
-    {k:'markEvery',l:'Every',min:0,max:600,step:10,u:' s',off:'off'}
+    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'}
   ],
   segments:prof=>prof.colors.length,
   first:prof=>hexToRgb(prof.colors[0]),
-  colorAt:(prof,p)=>gradientAt(stopsOf(prof),p,prof.blend/100),
+  colorAt(prof,p,L){ return PULSE.led({len:L},p*L,prof,{maxHz:99}).c; },
   led(win,local,prof,G){
-    const L=win.len,p=local/L;
-    const f0=Math.min((prof.paced?prof.pace0/60:prof.rate0/L),G.maxHz), f1=Math.min((prof.paced?prof.pace1/60:prof.rate1/L),G.maxHz);
-    const a=accel(local,L,f0,f1,prof.curve,prof.rampAt/100);
-    const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
-    const fl=prof.floor/100;
-    let b=fl+(1-fl)*w;
-    /* the first seconds are a solid light in the first color, then it fades out into the pulse train (which keeps running on the window clock) */
-    const S=Math.min(prof.solid,L*0.5), F=Math.min(prof.fade,L*0.25);
-    if(local<S) b=1; else if(local<S+F) b=1+(b-1)*smooth(S,S+F,local);
-    /* time marks: a quick double flash every markEvery seconds, so a long window still tells you how far along you are */
-    if(prof.markEvery>0&&local>=prof.markEvery&&L-local>=2){ const m=local%prof.markEvery; if(m<0.5) b=(m<0.12||(m>=0.25&&m<0.37))?1:0; }
-    return {c:gradientAt(stopsOf(prof),p,prof.blend/100),b};
+    const L=win.len, F=Math.min(prof.final,L), head=L-F, K=prof.colors.length;
+    let c,b;
+    if(local<head){                                                   /* long load: slow pulses, one color per equal share */
+      const seg=head/K, w=Math.min(prof.blend/100,3/seg);              /* colors change at once, with at most a 3 s crossfade */
+      c=gradientAt(stopsOf(prof),local/head,w);
+      const dim=prof.longDim/100;
+      b=dim+(1-dim)*(0.5+0.5*Math.cos(TAU*local/prof.longCycle));     /* starts at the peak, like the start flash */
+    }else{                                                            /* final stretch: the normal accelerating sequence from the first color */
+      const lt=local-head, f0=Math.min(prof.rate0/F,G.maxHz), f1=Math.min(prof.rate1/F,G.maxHz), fl=prof.floor/100;
+      const a=accel(lt,F,f0,f1,prof.curve);
+      const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
+      b=fl+(1-fl)*w; c=gradientAt(stopsOf(prof),lt/F,prof.blend/100);
+    }
+    /* the first seconds are a solid light in the first color, then it fades out into what follows */
+    const S=Math.min(prof.solid,L*0.5), Fd=Math.min(prof.fade,L*0.25);
+    if(local<S) b=1; else if(local<S+Fd) b=1+(b-1)*smooth(S,S+Fd,local);
+    /* time marks (long loads only): a quick double flash every `markEvery` seconds, so you can tell how far along you are */
+    if(prof.markEvery>0&&local>=prof.markEvery&&local<head){ const m=local%prof.markEvery; if(m<0.5) b=(m<0.12||(m>=0.25&&m<0.37))?1:0; }
+    return {c,b};
   }
 };
 
@@ -542,7 +578,7 @@ function defaults(){
     holdMs:0,maxHz:7,master:100,blind:false,
     pins:{timer:{r:13,g:11,b:10,com:12,anode:true},set:{r:2,g:4,b:5,com:3,anode:true}},
     profiles:{
-      load:{solid:3,fade:1,paced:false,pace0:6,pace1:60,rampAt:0,markEvery:0,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
+      load:{solid:3,fade:1,final:30,longCycle:4,longDim:15,markEvery:0,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
       trans:transProfile(),
       lead:transProfile()
     }
@@ -570,7 +606,7 @@ function normalize(raw){
   for(const k of Object.keys(d.names)) d.names[k]=String(d.names[k]).slice(0,24);
   d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
   d.profiles.load.solid=clamp(d.profiles.load.solid,0,10); d.profiles.load.fade=clamp(d.profiles.load.fade,0,5);
-  { const L=d.profiles.load; L.pace0=clamp(L.pace0,1,300); L.pace1=clamp(L.pace1,1,300); L.rampAt=clamp(L.rampAt,0,90); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); }
+  { const L=d.profiles.load; L.final=clamp(L.final,10,120); L.longCycle=clamp(L.longCycle,2,20); L.longDim=clamp(L.longDim,0,60); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); }
   d.leadSec=clamp(d.leadSec,1,600); d.holdMs=clamp(d.holdMs,0,1000); d.maxHz=clamp(d.maxHz,1,8); d.master=clamp(d.master,10,100);
   const dp=defaults().pins;
   for(const k of ['timer','set']){
@@ -747,7 +783,7 @@ function buildMap(W,H){
     const {impl,prof}=implFor(cfg,w.type);
     const x0=Math.round(w.start/PLAN.total*W), x1=Math.round((w.start+w.len)/PLAN.total*W)-gap;
     const n=Math.max(1,x1-x0);   /* narrow windows (many repeats) keep at least one pixel */
-    for(let x=x0;x<Math.max(x1,x0+1);x++){ g.fillStyle=rgbCss(shade(impl.colorAt(prof,(x-x0+0.5)/n))); g.fillRect(x,0,1,H); }
+    for(let x=x0;x<Math.max(x1,x0+1);x++){ g.fillStyle=rgbCss(shade(impl.colorAt(prof,(x-x0+0.5)/n,w.len))); g.fillRect(x,0,1,H); }
   });
   return c;
 }
@@ -772,7 +808,14 @@ function buildWave(win,W,H,axis){
   }
   g.fillStyle=TH.line; g.fillRect(0,base,W,Math.max(1,DPR));
   g.strokeStyle=TH.light?'rgba(0,0,0,0.3)':'rgba(255,255,255,0.28)'; g.lineWidth=Math.max(1,DPR); g.setLineDash([4*DPR,4*DPR]);
-  for(let i=1;i<K;i++){ const x=Math.round(i/K*W); g.beginPath(); g.moveTo(x,top); g.lineTo(x,base); g.stroke(); }
+  const cuts=[];                                                      /* where the color changes */
+  if(impl===PULSE&&win.len>prof.final){                                /* long load: K shares before the final stretch, then K more inside it */
+    const F=prof.final, head=win.len-F;
+    for(let i=1;i<K;i++) cuts.push(i/K*head/win.len);
+    cuts.push(head/win.len);
+    for(let i=1;i<K;i++) cuts.push((head+i/K*F)/win.len);
+  }else for(let i=1;i<K;i++) cuts.push(i/K);
+  for(const f of cuts){ const x=Math.round(f*W); g.beginPath(); g.moveTo(x,top); g.lineTo(x,base); g.stroke(); }
   g.setLineDash([]);
   if(axis){
     g.fillStyle=TH.muted; g.font=`400 ${Math.round(10*DPR)}px "IBM Plex Mono",ui-monospace,monospace`;
@@ -968,7 +1011,8 @@ function updateSummaries(){
   $('#sum-led').textContent=`${cfg.master}%`;
   $('#sum-dev').textContent=pinConflicts()?'⚠':'';
 }
-function touch(){ CFG_VER++; scheduleSave(); schedulePreviews(); updateSummaries(); }
+let presetPT=0;
+function touch(){ CFG_VER++; scheduleSave(); schedulePreviews(); updateSummaries(); clearTimeout(presetPT); presetPT=setTimeout(()=>{ if(!P.editing) renderPresets(); },250); }   /* keeps the "changed" tag on the active saved timer current */
 document.querySelectorAll('#screenSet details').forEach(d=>d.addEventListener('toggle',schedulePreviews));
 
 /* ============ settings: timing ============ */
@@ -1208,7 +1252,7 @@ async function devProbe(){
     if(!j||j.app!=='beacon') return;
     DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
     applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
-    setLink(true); devPoll();
+    setLink(true); presetsLoad(); devPoll();
   }catch(e){}
 }
 async function waitDevice(){
@@ -1268,6 +1312,115 @@ rebootBtn.addEventListener('click',async()=>{
 /* touch screens: a long press should not open the browser's context menu (inputs keep theirs, for paste) */
 try{ if(matchMedia('(pointer:coarse)').matches) document.addEventListener('contextmenu',e=>{ if(!e.target.closest('input,textarea,select')) e.preventDefault(); }); }catch(e){}
 
+/* ============ saved timers ============
+   A saved timer is the whole timing + light setup under a name. Wiring (pins), brightness limits and the hide-LEDs switch
+   belong to the device / this screen, not to a timer, so loading one never touches them. On the board the list lives in
+   the board's own storage (so every phone sees it); in a plain browser it lives in this browser. */
+const PRESET_KEY='interval-beacon-presets-v1', ACTIVE_KEY='interval-beacon-active-preset', PRESET_MAX=20, PRESET_BYTES=30000;
+const PRESET_SKIP=['pins','blind','master','maxHz'];
+const P={list:[],active:null,editing:null,msgT:0};
+try{ P.active=localStorage.getItem(ACTIVE_KEY)||null; }catch(e){}
+const presetCfg=c=>{ const o=JSON.parse(JSON.stringify(c)); for(const k of PRESET_SKIP) delete o[k]; return o; };
+const presetKey=c=>JSON.stringify(presetCfg(normalize(c)));
+function presetMsg(t,bad){ const m=$('#pMsg'); m.textContent=t||''; m.style.color=bad?'var(--bad)':''; clearTimeout(P.msgT); if(t) P.msgT=setTimeout(()=>{ m.textContent=''; },4500); }
+function presetsClean(a){
+  if(!Array.isArray(a)) return [];
+  return a.filter(x=>x&&typeof x.id==='string'&&typeof x.name==='string'&&x.cfg&&typeof x.cfg==='object').slice(0,PRESET_MAX).map(x=>({id:x.id.slice(0,16),name:x.name.slice(0,24),cfg:x.cfg}));
+}
+async function presetsLoad(){
+  try{
+    if(DEV.on) P.list=presetsClean(await api('/api/presets'));
+    else P.list=presetsClean(JSON.parse(localStorage.getItem(PRESET_KEY)||'[]'));
+  }catch(e){ if(!DEV.on) P.list=[]; }
+  renderPresets();
+}
+async function presetsStore(next){                                    /* returns true when the new list is saved */
+  const body=JSON.stringify(next);
+  if(body.length>PRESET_BYTES){ presetMsg('Storage is full. Delete a saved timer first.',true); return false; }
+  try{
+    if(DEV.on) await api('/api/presets',{method:'POST',headers:{'Content-Type':'text/plain'},body});
+    else localStorage.setItem(PRESET_KEY,body);
+    P.list=next; return true;
+  }catch(e){ presetMsg(DEV.on?'Could not save to the timer. Check the connection.':'Could not save in this browser.',true); return false; }
+}
+const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function setActive(id){ P.active=id; try{ if(id) localStorage.setItem(ACTIVE_KEY,id); else localStorage.removeItem(ACTIVE_KEY); }catch(e){} }
+async function presetCreate(){
+  const inp=$('#pName'); let name=inp.value.trim().slice(0,24);
+  if(P.list.length>=PRESET_MAX){ presetMsg(`Up to ${PRESET_MAX} saved timers. Delete one to add another.`,true); return; }
+  if(!name) name='Timer '+(P.list.length+1);
+  const item={id:newId(),name,cfg:presetCfg(cfg)};
+  if(await presetsStore([...P.list,item])){ inp.value=''; setActive(item.id); presetMsg(`Saved "${name}".`); }
+  renderPresets();
+}
+async function presetUpdate(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  if(await presetsStore(P.list.map(x=>x.id===id?{...x,cfg:presetCfg(cfg)}:x))){ setActive(id); presetMsg(`Updated "${it.name}" with the current settings.`); }
+  renderPresets();
+}
+async function presetRename(id,name){
+  name=name.trim().slice(0,24); P.editing=null;
+  if(name&&await presetsStore(P.list.map(x=>x.id===id?{...x,name}:x))) presetMsg('Renamed.');
+  renderPresets();
+}
+async function presetDelete(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  if(await presetsStore(P.list.filter(x=>x.id!==id))){ if(P.active===id) setActive(null); presetMsg(`Deleted "${it.name}".`); }
+  renderPresets();
+}
+function presetLoadNow(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  const keep={}; for(const k of PRESET_SKIP) keep[k]=cfg[k];
+  cfg=normalize(Object.assign({},it.cfg,keep));
+  rebuildAll(); doReset(); schedulePreviews(); scheduleSave(); setActive(id); renderPresets(); presetMsg(`Loaded "${it.name}".`);
+}
+/* a button that needs a second tap within 3 s: confirm() is unavailable, so destructive things ask twice */
+function twoTap(btn,armed,fn){
+  btn.addEventListener('click',()=>{
+    if(btn._arm){ clearTimeout(btn._arm); btn._arm=0; fn(); return; }
+    const was=btn.innerHTML; btn.classList.add('arm'); btn.textContent=armed;
+    btn._arm=setTimeout(()=>{ btn._arm=0; btn.classList.remove('arm'); btn.innerHTML=was; },3000);
+  });
+}
+function renderPresets(){
+  const box=$('#pList'); box.textContent='';
+  const act=P.list.find(x=>x.id===P.active);
+  $('#sum-presets').textContent=act?act.name:(P.list.length?`${P.list.length} saved`:'');
+  if(!P.list.length){ const n=el('p','note'); n.textContent='Nothing saved yet. Set the timer up the way you like, name it above and tap Save.'; box.append(n); return; }
+  const snap=presetKey(cfg);
+  for(const it of P.list){
+    const row=el('div','prow'+(it.id===P.active?' on':'')); 
+    if(P.editing===it.id){
+      const inp=el('input','txt'); inp.type='text'; inp.maxLength=24; inp.value=it.name; inp.setAttribute('aria-label','New name');
+      const ok=el('button','sb',ICON('check')); ok.type='button'; ok.setAttribute('aria-label','Save name');
+      const no=el('button','sb',ICON('x')); no.type='button'; no.setAttribute('aria-label','Cancel');
+      ok.addEventListener('click',()=>presetRename(it.id,inp.value)); no.addEventListener('click',()=>{ P.editing=null; renderPresets(); });
+      inp.addEventListener('keydown',e=>{ if(e.key==='Enter') presetRename(it.id,inp.value); else if(e.key==='Escape'){ P.editing=null; renderPresets(); } });
+      row.append(inp,ok,no); box.append(row); setTimeout(()=>{ inp.focus(); inp.select(); },0); continue;
+    }
+    const load=el('button','pload'); load.type='button'; load.setAttribute('aria-label','Load '+it.name);
+    const n=el('span','pn'); n.textContent=it.name;
+    const c=normalize(it.cfg), mod=it.id===P.active&&presetKey(it.cfg)!==snap;
+    const sub=el('span','ps'); sub.textContent=`${fmtDur(c.loadSec)} load · ${c.sets}×${c.repeat} · ${fmtDur(buildWindows(c).total)}${mod?' · changed':''}`;
+    load.append(n,sub);
+    const live=()=>S.state==='run'||S.state==='pause';
+    load.addEventListener('click',()=>{
+      if(!live()){ presetLoadNow(it.id); return; }
+      if(load._arm){ clearTimeout(load._arm); load._arm=0; presetLoadNow(it.id); return; }
+      sub.textContent='Tap again to replace the running timer';
+      load._arm=setTimeout(()=>{ load._arm=0; renderPresets(); },3000);
+    });
+    const upd=el('button','sb',ICON('save')); upd.type='button'; upd.setAttribute('aria-label','Update '+it.name+' with the current settings'); upd.title='Update with current settings';
+    const ren=el('button','sb',ICON('edit')); ren.type='button'; ren.setAttribute('aria-label','Rename '+it.name); ren.title='Rename';
+    const del=el('button','sb',ICON('trash')); del.type='button'; del.setAttribute('aria-label','Delete '+it.name); del.title='Delete';
+    twoTap(upd,'Overwrite?',()=>presetUpdate(it.id)); twoTap(del,'Delete?',()=>presetDelete(it.id));
+    ren.addEventListener('click',()=>{ P.editing=it.id; renderPresets(); });
+    row.append(load,upd,ren,del); box.append(row);
+  }
+}
+$('#pAdd').addEventListener('click',presetCreate);
+$('#pName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); presetCreate(); } });
+
 /* ============ boot ============ */
 function rebuildAll(){
   PLAN=buildWindows(cfg); SET_COLORS=setColors(trackN(cfg)); CFG_VER++;
@@ -1276,6 +1429,7 @@ function rebuildAll(){
 }
 function applyRemoteConfig(raw){ const blind=cfg.blind; cfg=normalize(raw); cfg.blind=blind; rebuildAll(); schedulePreviews(); }
 rebuildAll();
+presetsLoad();
 requestAnimationFrame(frame);
 devProbe();
 </script>
