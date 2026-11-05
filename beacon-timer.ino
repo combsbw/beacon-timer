@@ -25,6 +25,9 @@
 #include <Update.h>
 #include <Preferences.h>
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 #include "driver/gpio.h"
 #include "esp_timer.h"
 
@@ -33,8 +36,9 @@
 #include "config.h"
 #include "webui.h"
 #include "icons.h"
+#include "ghupdate.h"
 
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0"
 #define AP_SSID "Beacon-timer"          // open network, no password
 #define AP_CHANNEL 6
 #define AP_MAX_CLIENTS 4
@@ -106,6 +110,9 @@ static bc::Engine eng;
 static SemaphoreHandle_t engMtx;
 static volatile bool otaBusy = false;
 static volatile uint32_t rebootAtMs = 0;
+// Online update from GitHub: phase 1 joining Wi-Fi, 2 clock, 3 finding the release, 4 downloading, 5 done, 6 failed (0 = idle)
+static volatile uint8_t updPhase = 0, updPct = 0, updErr = 0;
+static volatile uint32_t updStartAt = 0;
 
 static Preferences prefs;
 static String cfgRaw;                 // the settings JSON exactly as the UI sent it
@@ -126,6 +133,34 @@ static void applyHardware(const bc::Config& c) {
   hwApply(1, c.pins[1]);
 }
 
+// ---- LED patterns while an online update runs: proof of life, which step, how far, and why it failed -----------------
+//   Timer LED: slow breathing (amber while connecting, cyan while downloading), solid green when done, fast red blink on failure.
+//   Set LED:   steps 1-3 flash 1, 2 or 3 times then pause; download = a red-to-green bar color with a heartbeat dip each second;
+//              failure = flashes the error number (1 Wi-Fi, 2 clock, 3 GitHub, 4 download, 5 flash write), pause, repeat.
+static void updLeds(bc::Out& o) {
+  uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000);
+  uint8_t ph = updPhase;
+  float breath = 0.3f + 0.25f * sinf((float)(ms % 1500) / 1500.f * bc::TAU_F);
+  const bc::Rgb white = {255.f, 255.f, 255.f};
+  if (ph >= 1 && ph <= 3) {
+    o.c1 = bc::Rgb{255.f, 170.f, 0.f}; o.b1 = breath;
+    uint32_t t = ms % 2400, slot = t / 350;
+    o.c2 = white; o.b2 = (slot < ph && (t % 350) < 150) ? 0.9f : 0.f;
+  } else if (ph == 4) {
+    float f = updPct / 100.f;
+    bc::Rgb a = {255.f, 40.f, 0.f}, m = {255.f, 200.f, 0.f}, g = {30.f, 230.f, 90.f};
+    o.c1 = bc::Rgb{0.f, 170.f, 255.f}; o.b1 = breath;
+    o.c2 = f < 0.5f ? bc::mixRgb(a, m, f * 2.f) : bc::mixRgb(m, g, (f - 0.5f) * 2.f);
+    o.b2 = (ms % 1000) < 120 ? 0.25f : 0.9f;
+  } else if (ph == 5) {
+    o.c1 = bc::Rgb{34.f, 224.f, 112.f}; o.b1 = 1.f; o.c2 = o.c1; o.b2 = 1.f;
+  } else {
+    o.c1 = bc::Rgb{255.f, 31.f, 45.f}; o.b1 = ((ms / 125) & 1) ? 1.f : 0.05f;
+    uint32_t n = updErr ? updErr : 1, cyc = n * 350 + 1200, t = ms % cyc;
+    o.c2 = white; o.b2 = (t < n * 350 && (t % 350) < 150) ? 0.9f : 0.f;
+  }
+}
+
 // ---- LED task: 250 Hz, on its own so the LEDs stay smooth while the web server is busy -------------------------------
 static void ledTask(void*) {
   TickType_t last = xTaskGetTickCount();
@@ -135,7 +170,9 @@ static void ledTask(void*) {
     LOCK();
     eng.render(esp_timer_get_time(), o);
     float master = eng.cfg.master / 100.f;
-    if (otaBusy) {                                  // firmware update running: timer LED breathes cyan, set LED off
+    if (updPhase) {
+      updLeds(o);
+    } else if (otaBusy) {                           // firmware update running: timer LED breathes cyan, set LED off
       float br = 0.3f + 0.25f * sinf((float)(esp_timer_get_time() % 1500000) / 1500000.f * bc::TAU_F);
       o.c1 = bc::Rgb{0.f, 170.f, 255.f}; o.b1 = br; o.b2 = 0.f;
     }
@@ -277,6 +314,199 @@ static void handlePresetsPost() {
   sendJson(200, "{\"ok\":true}");
 }
 
+// ---- online update from GitHub ------------------------------------------------------------------------------------
+// The page stores a Wi-Fi network (and optionally a repo / token for a private repo). "Update" leaves the soft AP, joins that
+// network, downloads the newest .bin from the repo's "latest" release over verified HTTPS, installs it and restarts, which
+// brings the soft AP back. Result and failure reason are kept in flash for the page to show afterwards.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+
+static String jsonEsc(const String& s) {
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) o += ' ';
+    else o += c;
+  }
+  return o;
+}
+
+// Never sends the saved password or token back, only whether they exist.
+static void handleUpdInfo() {
+  String ssid = prefs.getString("wSsid", ""), repo = prefs.getString("wRepo", GH_REPO_DEFAULT);
+  bool hasPass = prefs.getString("wPass", "").length() > 0, hasTok = prefs.getString("wTok", "").length() > 0;
+  String r = String("{\"ssid\":\"") + jsonEsc(ssid) + "\",\"hasPass\":" + (hasPass ? "true" : "false") + ",\"repo\":\"" + jsonEsc(repo) +
+             "\",\"hasToken\":" + (hasTok ? "true" : "false") + ",\"last\":\"" + jsonEsc(prefs.getString("wRes", "")) +
+             "\",\"from\":\"" + jsonEsc(prefs.getString("wFrom", "")) + "\",\"ver\":\"" FW_VERSION "\"}";
+  sendJson(200, r.c_str());
+}
+
+// Form fields (any subset): ssid, pass, repo, token. A field that is not sent stays as it was; token "" clears it.
+static void handleUpdSave() {
+  if (server.hasArg("ssid")) { String v = server.arg("ssid"); if (v.length() > 32) { sendJson(400, "{\"ok\":false,\"err\":\"ssid\"}"); return; } prefs.putString("wSsid", v); }
+  if (server.hasArg("pass")) { String v = server.arg("pass"); if (v.length() > 63) { sendJson(400, "{\"ok\":false,\"err\":\"pass\"}"); return; } prefs.putString("wPass", v); }
+  if (server.hasArg("repo")) {
+    String v = server.arg("repo");
+    if (v.length() == 0) v = GH_REPO_DEFAULT;
+    if (!bc::ghRepoOk(v.c_str())) { sendJson(400, "{\"ok\":false,\"err\":\"repo\"}"); return; }
+    prefs.putString("wRepo", v);
+  }
+  if (server.hasArg("token")) {
+    String v = server.arg("token");
+    if (!bc::ghTokenOk(v.c_str())) { sendJson(400, "{\"ok\":false,\"err\":\"token\"}"); return; }
+    prefs.putString("wTok", v);
+  }
+  sendJson(200, "{\"ok\":true}");
+}
+
+static void handleUpdStart() {
+  if (prefs.getString("wSsid", "").length() == 0) { sendJson(400, "{\"ok\":false,\"err\":\"ssid\"}"); return; }
+  LOCK();
+  bool running = eng.state == bc::ST_RUN || eng.state == bc::ST_PAUSE;
+  UNLOCK();
+  if (running || otaBusy || updPhase) { sendJson(409, "{\"ok\":false,\"err\":\"busy\"}"); return; }
+  sendJson(200, "{\"ok\":true}");
+  updStartAt = millis() + 900;            // let this reply reach the phone before the access point goes away
+  if (!updStartAt) updStartAt = 1;
+}
+
+static bool updFail(uint8_t code, const char* why) {
+  updErr = code;
+  Serial.printf("online update failed (%u): %s\n", (unsigned)code, why);
+  return false;
+}
+
+// One request, following redirects by hand so the token only goes to api.github.com and never to the file host.
+static bool ghFetch(WiFiClientSecure& cl, HTTPClient& http, String url, const String& tok, const char* accept) {
+  for (int hop = 0; hop < 6; hop++) {
+    char host[80];
+    bc::ghUrlHost(url.c_str(), host, sizeof host);
+    if (!host[0]) return false;
+    http.end();
+    cl.stop();
+    if (!http.begin(cl, url)) return false;
+    http.setUserAgent("beacon-timer");
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http.setTimeout(15000);
+    http.addHeader("Accept", accept);
+    if (tok.length() && bc::ghIsApiHost(host)) http.addHeader("Authorization", String("Bearer ") + tok);
+    const char* keys[] = {"Location"};
+    http.collectHeaders(keys, 1);
+    int code = http.GET();
+    if (code == 200) return true;
+    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+      url = http.header("Location");
+      if (url.length() == 0) return false;
+      continue;
+    }
+    Serial.printf("HTTP %d from %s\n", code, host);
+    return false;
+  }
+  return false;
+}
+
+static void runWebUpdate() {
+  if (cfgDirty) cfgSaveNow();
+  String ssid = prefs.getString("wSsid", ""), pass = prefs.getString("wPass", "");
+  String repo = prefs.getString("wRepo", GH_REPO_DEFAULT), tok = prefs.getString("wTok", "");
+  prefs.putString("wFrom", FW_VERSION);
+  prefs.putString("wRes", "");
+  otaBusy = true; updErr = 0; updPct = 0; updPhase = 1;
+  Serial.println("online update: leaving the soft AP");
+
+  server.stop();
+#if CAPTIVE_PORTAL
+  dns.stop();
+#endif
+  ArduinoOTA.end();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  bool ok = true;
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) delay(100);
+  if (WiFi.status() != WL_CONNECTED) ok = updFail(bc::UE_WIFI, "could not join the Wi-Fi network");
+
+  if (ok) {                                // certificate dates are checked, so the clock must be right
+    updPhase = 2;
+    configTime(0, 0, "pool.ntp.org", "time.cloudflare.com", "time.google.com");
+    t0 = millis();
+    while (time(nullptr) < 1700000000 && millis() - t0 < 15000) delay(100);
+    if (time(nullptr) < 1700000000) ok = updFail(bc::UE_TIME, "no internet time");
+  }
+
+  WiFiClientSecure cl;
+  HTTPClient http;
+  bool begun = false;
+  if (ok) {
+    updPhase = 3;
+    cl.setCACertBundle(rootca_crt_bundle_start);
+    String url = String("https://github.com/") + repo + "/releases/download/" GH_TAG "/" GH_ASSET;
+    const char* accept = "application/octet-stream";
+    if (tok.length()) {                    // private repo: ask the API for the asset, then fetch it with the token
+      url = String("https://api.github.com/repos/") + repo + "/releases/tags/" GH_TAG;
+      if (!ghFetch(cl, http, url, tok, "application/vnd.github+json")) ok = updFail(bc::UE_LOOKUP, "release lookup");
+      else {
+        String js = http.getString();
+        http.end();
+        char au[200];
+        if (!bc::ghFindAssetUrl(js.c_str(), js.length(), GH_ASSET, au, sizeof au)) ok = updFail(bc::UE_LOOKUP, "asset not in release");
+        else url = au;
+      }
+    }
+    if (ok && !ghFetch(cl, http, url, tok, accept)) ok = updFail(bc::UE_LOOKUP, "download request");
+  }
+
+  if (ok) {
+    int len = http.getSize();
+    if (len < 200000 || len > 0x140000) ok = updFail(bc::UE_DOWNLOAD, "unexpected file size");
+    else if (!Update.begin((size_t)len, U_FLASH)) ok = updFail(bc::UE_FLASH, "no room for the update");
+    else {
+      begun = true;
+      updPhase = 4;
+      WiFiClient* stream = http.getStreamPtr();
+      uint8_t buf[1024];
+      size_t done = 0;
+      uint32_t lastData = millis();
+      while (done < (size_t)len) {
+        size_t avail = stream->available();
+        if (avail) {
+          size_t want = avail < sizeof buf ? avail : sizeof buf;
+          if (want > (size_t)len - done) want = (size_t)len - done;
+          int n = stream->readBytes(buf, want);
+          if (n <= 0) continue;
+          if (Update.write(buf, (size_t)n) != (size_t)n) { ok = updFail(bc::UE_FLASH, "flash write"); break; }
+          done += (size_t)n;
+          updPct = (uint8_t)((uint64_t)done * 100 / (size_t)len);
+          lastData = millis();
+        } else {
+          if (!stream->connected()) break;
+          if (millis() - lastData > 20000) { ok = updFail(bc::UE_DOWNLOAD, "download stalled"); break; }
+          delay(2);
+        }
+      }
+      if (ok && done != (size_t)len) ok = updFail(bc::UE_DOWNLOAD, "download ended early");
+      if (ok && !Update.end(true)) ok = updFail(bc::UE_FLASH, "image check failed");
+    }
+  }
+  http.end();
+  if (!ok && begun) Update.abort();
+
+  if (ok) {
+    prefs.putString("wRes", "ok");
+    updPhase = 5;
+    Serial.println("online update installed, restarting");
+    delay(2500);                           // solid green so you can see it worked
+  } else {
+    prefs.putString("wRes", String("e") + String((unsigned)updErr));
+    updPhase = 6;
+    delay(12000);                          // error flashes
+  }
+  ESP.restart();                           // either way the soft AP comes back with the next boot
+}
+
 static void handleReboot() {
   sendJson(200, "{\"ok\":true}");
   rebootAtMs = millis() + 600;
@@ -341,6 +571,9 @@ void setup() {
   server.on("/favicon.ico", HTTP_GET, handleIcon192);
   server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
   server.on("/api/state", HTTP_GET, sendState);
+  server.on("/api/update", HTTP_GET, handleUpdInfo);
+  server.on("/api/update/save", HTTP_POST, handleUpdSave);
+  server.on("/api/update/start", HTTP_POST, handleUpdStart);
   server.on("/api/presets", HTTP_GET, handlePresetsGet);
   server.on("/api/presets", HTTP_POST, handlePresetsPost);
   server.on("/api/cmd", HTTP_POST, handleCmd);
@@ -369,6 +602,7 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
 
+  if (updStartAt && (int32_t)(millis() - updStartAt) >= 0) { updStartAt = 0; runWebUpdate(); }   // does not return: it restarts
   if (cfgDirty && millis() - cfgDirtyAt > 2000) cfgSaveNow();
   if (rebootAtMs && (int32_t)(millis() - rebootAtMs) >= 0) {
     if (cfgDirty) cfgSaveNow();

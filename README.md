@@ -108,6 +108,26 @@ delete ask for a second tap). Up to 20 are kept. Pins, brightness limits and the
 timer, so loading one never changes the wiring settings. On the board the list is stored in its flash (LittleFS), so every
 phone sees the same list; in a plain browser it is kept in that browser.
 
+## Online update from GitHub
+
+Settings > Device > **Online update**: enter the Wi-Fi network the board should use for the internet (a phone hotspot works;
+2.4 GHz only) and its password, tap **Save**, then **Update now** (two taps). The board:
+
+1. leaves its own Wi-Fi and joins your network (Timer LED breathes amber, Set LED flashes once),
+2. gets the internet time, needed to check GitHub's certificate (Set LED flashes twice),
+3. finds the release (Set LED flashes three times),
+4. downloads `beacon-timer.ota.bin` from the repo's **Latest build** release over verified HTTPS (Timer LED breathes cyan,
+   Set LED is a bar from red through yellow to green with a quick dip each second),
+5. installs it, flashes green, and restarts, which brings the Beacon-timer Wi-Fi back.
+
+If it fails, the Timer LED blinks red and the Set LED flashes the error number (1 Wi-Fi, 2 clock, 3 GitHub, 4 download,
+5 flash write), then the board restarts on the old firmware. The page shows the result when you rejoin Beacon-timer. The
+update is refused while a timer is running. The repository defaults to `combsbw/beacon-timer`; for a private repository
+put a read-only token under *GitHub source* (the token is sent only to api.github.com).
+
+The Wi-Fi password and token are stored in the board's flash as plain text and are never sent back to the page. The Beacon-timer
+Wi-Fi is open, so anyone in range could change them or start an update, as they could already upload firmware.
+
 ## Notes
 
 - Flashing faster than about 3 Hz can affect people with photosensitive epilepsy; "Max Hz" in Settings > LEDs caps the rate (default 7).
