@@ -193,6 +193,7 @@ canvas{display:block;width:100%}
 .warnline .ic{width:18px;height:18px}
 .fwrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .fbtn{display:flex;align-items:center;gap:8px;min-height:46px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--field);font-weight:600}
+a.fbtn{text-decoration:none;width:fit-content}
 .fbtn.primary{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
 .fbtn:disabled{opacity:.4;cursor:default}
 .fbtn .ic{width:18px;height:18px}
@@ -417,6 +418,11 @@ canvas{display:block;width:100%}
               <button class="fbtn primary" id="wakeBtn" type="button" hidden><svg class="ic"><use href="#i-sun"/></svg><span>Wake</span></button>
               <button class="fbtn primary" id="netGo" type="button" hidden><svg class="ic"><use href="#i-power"/></svg><span id="netGoTxt">Reboot</span></button>
             </div>
+          </div>
+          <div class="pcard" id="certCard" hidden>
+            <div class="ph"><svg class="ic"><use href="#i-link"/></svg><span>One icon</span></div>
+            <p class="note" id="certNote"></p>
+            <a class="fbtn primary" id="certBtn" href="/beacon.mobileconfig" hidden>Install certificate</a>
           </div>
           <div class="pcard" id="upCard">
             <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Online update</span><span class="mono" id="upLast" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
@@ -1231,8 +1237,8 @@ function buildPins(){
 }
 
 /* ============ device link ============ */
-/* On the device's own page (http, soft AP or home Wi-Fi) this talks to the sketch: it polls the timer state, pushes
-   settings and sends commands. Anywhere else nothing answers, so the timer on this page stands alone. */
+/* On the timer's own page (http, or https://beacon-timer.local) this talks to the sketch: it polls the timer
+   state, pushes settings and sends commands. On any other site nothing answers, so the timer stands alone. */
 const DEV={on:false,rev:-1,seq:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function api(path,opt){
@@ -1305,14 +1311,18 @@ async function devPoll(){
   setTimeout(devPoll,DEV.fails?1500:(DEV.asleep?4000:300));
 }
 async function devProbe(){
-  if(location.protocol!=='http:') return;
-  try{
-    const j=await api('/api/state');
-    if(!j||j.app!=='beacon') return;
-    DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
-    applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
-    setLink(true); presetsLoad(); upLoad(); netLoad(); devPoll();
-  }catch(e){}
+  const home=location.hostname==='beacon-timer.local';
+  const tries=home?3:1;
+  for(let i=0;i<tries;i++){
+    try{
+      const j=await api('/api/state',{timeout:home?8000:3000});
+      if(!j||j.app!=='beacon') return;
+      DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
+      applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
+      setLink(true); presetsLoad(); upLoad(); netLoad(); devPoll();
+      return;
+    }catch(e){ if(i+1<tries) await sleep(1000); }
+  }
 }
 async function waitDevice(tries=45,label='Rebooting'){
   DEV.rebooting=true; setLink(false,label); await sleep(2500);
@@ -1346,15 +1356,28 @@ function renderNet(){
   netStat.textContent=on?(sta?(DEV.asleep?'asleep':i.ip):(i.fail?'fallback':i.ip)):'';
   if(!NET.hold) netSta.checked=on&&i.wanted==='sta';
   const key=!on?'off':[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0].join('|');
-  if(key===NET.key) { $('#sum-dev').textContent=devSummary(); return; }
+  if(key===NET.key) { $('#sum-dev').textContent=devSummary(); renderCert(); return; }
   NET.key=key;
   if(!on) netMsg('Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
   else if(NET.hold){ /* the switch handler wrote the reboot instructions */ }
   else if(i.fail) netMsg('Could not join “'+(i.ssid||'the saved network')+'”. This boot is the Beacon-timer access point. Check the name and password below. The next boot tries again unless Home Wi-Fi is turned off.');
   else if(sta&&DEV.asleep) netMsg('Asleep. Tap Wake, or Asleep at the top. Starting a session also wakes it. The LEDs sleep again after 5 minutes with nothing running, or when you tap Sleep.');
-  else if(sta) netMsg('On '+((i.ssid)||'home Wi-Fi')+' at '+i.ip+'. Open http://'+i.host+'.local from this network. The LEDs sleep after 5 minutes with no session running. Turn Home Wi-Fi off to reboot into the Beacon-timer access point.');
+  else if(sta) netMsg('On '+((i.ssid)||'home Wi-Fi')+' at '+i.ip+'. Use One icon below so a single home-screen icon opens with the timer off and still runs it. The LEDs sleep after 5 minutes with no session running. Turn Home Wi-Fi off to reboot into the Beacon-timer access point.');
   else netMsg('Access point, always awake. The name and password below are the home network. Turn Home Wi-Fi on, then reboot.');
   $('#sum-dev').textContent=devSummary();
+  renderCert();
+}
+function renderCert(){
+  const card=$('#certCard'), btn=$('#certBtn'), note=$('#certNote');
+  if(location.hostname!=='beacon-timer.local'){ card.hidden=true; return; }
+  card.hidden=false;
+  if(location.protocol==='https:'){
+    btn.hidden=true;
+    note.textContent='This icon opens from the phone when the timer is off. It connects when the timer is on this Wi-Fi.';
+    return;
+  }
+  btn.hidden=false;
+  note.textContent='Do this once in Safari, while the timer is on this Wi-Fi. Tap Install certificate and allow the profile. Open Settings, tap Profile Downloaded at the top, then Install. Then go to Settings, General, About, Certificate Trust Settings, and turn Beacon Timer on. Back in Safari, open https://beacon-timer.local. If the phone asks to find devices on the local network, allow it. Tap Share, Add to Home Screen, and open that icon once while the timer is still on. The other Beacon icons can be deleted. If Profile Downloaded is missing, tap Install certificate again. It only stays available for a few minutes.';
 }
 async function netLoad(){
   if(!DEV.on){ NET.info=null; NET.key=''; renderNet(); return; }
@@ -1671,5 +1694,6 @@ function applyRemoteConfig(raw){ const blind=cfg.blind; cfg=normalize(raw); cfg.
 rebuildAll();
 presetsLoad();
 requestAnimationFrame(frame);
+renderCert();
 devProbe();
 </script><script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(function(){});}</script></body></html>
