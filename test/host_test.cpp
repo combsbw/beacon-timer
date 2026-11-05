@@ -6,6 +6,7 @@
 #include <string>
 #include "engine.h"
 #include "config.h"
+#include "ghupdate.h"
 
 using namespace bc;
 
@@ -212,6 +213,32 @@ static int stateTest() {
     CHECK(presetsJsonOk(ok1, strlen(ok1)) && presetsJsonOk(ok2, strlen(ok2)));
     const char* bad[] = {"", "{}", "[{\"id\":1,", "[1,2", "not json", "[{\"a\":}]"};
     for (const char* b : bad) CHECK(!presetsJsonOk(b, strlen(b)));
+  }
+
+  // GitHub update helpers
+  {
+    CHECK(ghRepoOk("combsbw/beacon-timer") && ghRepoOk("a/b.c-d_e") && !ghRepoOk("nobody") && !ghRepoOk("a/b/c") && !ghRepoOk("/x") && !ghRepoOk("a/") && !ghRepoOk("a b/c") && !ghRepoOk("a/b?x=1"));
+    CHECK(ghTokenOk("") && ghTokenOk("github_pat_11ABC_def-123") && ghTokenOk("ghp_abcdEF0123") && !ghTokenOk("bad token") && !ghTokenOk("a\"b"));
+    char h[40];
+    ghUrlHost("https://api.github.com/repos/x/y", h, sizeof h); CHECK(!strcmp(h, "api.github.com") && ghIsApiHost(h));
+    ghUrlHost("https://release-assets.githubusercontent.com:443/a?b=1", h, sizeof h); CHECK(!strcmp(h, "release-assets.githubusercontent.com") && !ghIsApiHost(h));
+    ghUrlHost("http://github.com/x", h, sizeof h); CHECK(h[0] == 0);
+    ghUrlHost("https://api.github.com.evil.example/x", h, sizeof h); CHECK(!ghIsApiHost(h));
+    const char* rel =
+      "{\"url\":\"https://api.github.com/repos/o/r/releases/1\",\"tag_name\":\"latest\",\"assets\":["
+      "{\"url\":\"https://api.github.com/repos/o/r/releases/assets/111\",\"id\":111,\"name\":\"beacon-timer.full.bin\","
+      "\"uploader\":{\"login\":\"x\",\"url\":\"https://api.github.com/users/x\"},\"size\":981680},"
+      "{\"url\":\"https://api.github.com/repos/o/r/releases/assets/222\",\"id\":222,\"name\":\"beacon-timer.ota.bin\","
+      "\"uploader\":{\"login\":\"x\",\"url\":\"https://api.github.com/users/x\"},\"size\":916144}]}";
+    char u[160];
+    CHECK(ghFindAssetUrl(rel, strlen(rel), "beacon-timer.ota.bin", u, sizeof u) && !strcmp(u, "https://api.github.com/repos/o/r/releases/assets/222"));
+    CHECK(ghFindAssetUrl(rel, strlen(rel), "beacon-timer.full.bin", u, sizeof u) && !strcmp(u, "https://api.github.com/repos/o/r/releases/assets/111"));
+    CHECK(!ghFindAssetUrl(rel, strlen(rel), "missing.bin", u, sizeof u));
+    const char* pretty = "{\n  \"assets\": [\n    {\n      \"url\": \"https://api.github.com/repos/o/r/releases/assets/7\",\n      \"id\": 7,\n      \"name\": \"beacon-timer.ota.bin\"\n    }\n  ]\n}";
+    CHECK(ghFindAssetUrl(pretty, strlen(pretty), "beacon-timer.ota.bin", u, sizeof u) && !strcmp(u, "https://api.github.com/repos/o/r/releases/assets/7"));
+    const char* evil = "{\"assets\":[{\"url\":\"https://evil.example/releases/assets/1\",\"name\":\"beacon-timer.ota.bin\"}]}";
+    CHECK(!ghFindAssetUrl(evil, strlen(evil), "beacon-timer.ota.bin", u, sizeof u));   // only GitHub's API host is accepted
+    CHECK(!ghFindAssetUrl("", 0, "x", u, sizeof u) && !ghFindAssetUrl("{\"name\":\"x\"}", 12, "x", u, sizeof u));
   }
 
   // settings parser: defaults on {}, clamping, bad pins, bad json

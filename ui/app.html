@@ -402,6 +402,25 @@ canvas{display:block;width:100%}
               <button class="fbtn badge" id="rebootBtn" type="button"><svg class="ic"><use href="#i-power"/></svg>Reboot</button>
             </div>
           </div>
+          <div class="pcard" id="upCard">
+            <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Online update</span><span class="mono" id="upLast" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
+            <input class="txt" id="upSsid" type="text" maxlength="32" placeholder="Wi-Fi name (2.4 GHz)" aria-label="Wi-Fi network name" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <input class="txt" id="upPass" type="password" maxlength="63" placeholder="Wi-Fi password" aria-label="Wi-Fi password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <details class="sub" id="upAdv">
+              <summary><svg class="ic"><use href="#i-link"/></svg>GitHub source<svg class="ic chev"><use href="#i-chev"/></svg></summary>
+              <div class="sbody">
+                <input class="txt" id="upRepo" type="text" maxlength="140" placeholder="owner/repository" aria-label="GitHub repository" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <input class="txt" id="upTok" type="password" maxlength="255" placeholder="Access token (private repo only)" aria-label="GitHub access token" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <p class="note">Leave the token empty for a public repository. For a private one, use a read-only token (Contents: read).</p>
+                <button class="rbtn" id="upTokClear" type="button" hidden><svg class="ic"><use href="#i-x"/></svg><span>Remove saved token</span></button>
+              </div>
+            </details>
+            <div class="fwrow">
+              <button class="fbtn" id="upSave" type="button"><svg class="ic"><use href="#i-save"/></svg>Save</button>
+              <button class="fbtn primary" id="upGo" type="button" disabled><svg class="ic"><use href="#i-upload"/></svg><span id="upGoTxt">Update now</span></button>
+            </div>
+            <p class="note" id="upNote" aria-live="polite"></p>
+          </div>
         </div>
       </details>
     </section>
@@ -1252,12 +1271,12 @@ async function devProbe(){
     if(!j||j.app!=='beacon') return;
     DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
     applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
-    setLink(true); presetsLoad(); devPoll();
+    setLink(true); presetsLoad(); upLoad(); devPoll();
   }catch(e){}
 }
-async function waitDevice(){
-  DEV.rebooting=true; setLink(false,'Rebooting'); await sleep(2500);
-  for(let i=0;i<45;i++){
+async function waitDevice(tries=45,label='Rebooting'){
+  DEV.rebooting=true; setLink(false,label); await sleep(2500);
+  for(let i=0;i<tries;i++){
     try{ const j=await api('/api/state'); if(j&&j.app==='beacon'){ DEV.rebooting=false; DEV.fails=0; setLink(true); DEV.rev=j.rev; $('#fwVer').textContent='v'+(j.ver||'?'); devApplyState(j,0); return true; } }catch(e){}
     await sleep(800);
   }
@@ -1311,6 +1330,85 @@ rebootBtn.addEventListener('click',async()=>{
 
 /* touch screens: a long press should not open the browser's context menu (inputs keep theirs, for paste) */
 try{ if(matchMedia('(pointer:coarse)').matches) document.addEventListener('contextmenu',e=>{ if(!e.target.closest('input,textarea,select')) e.preventDefault(); }); }catch(e){}
+
+/* ============ online update ============
+   Settings are saved on the board. "Update now" makes the board leave its own Wi-Fi, join the saved network, download the
+   newest build from the GitHub release, install it and restart (which brings its Wi-Fi back). While it runs this page can't
+   reach it, so the result is read back from the board once it returns. */
+const UPD_ERR={
+  e1:'Could not join the Wi-Fi network. Check the name and password; the board only joins 2.4 GHz networks.',
+  e2:'Joined the Wi-Fi network but could not get the internet time. Is that network online?',
+  e3:'Could not find the release on GitHub. Check the repository name, and the token if it is a private repository.',
+  e4:'The download failed or stalled. Try again.',
+  e5:'The new firmware did not install. The old firmware is still running.'
+};
+const UP={info:null,busy:false,arm:0,dirty:{pass:false,tok:false}};
+const upSsid=$('#upSsid'), upPass=$('#upPass'), upRepo=$('#upRepo'), upTok=$('#upTok'), upSave=$('#upSave'), upGo=$('#upGo'), upGoTxt=$('#upGoTxt'), upNote=$('#upNote'), upLast=$('#upLast'), upTokClear=$('#upTokClear');
+function upMsg(t,bad){ upNote.textContent=t||''; upNote.style.color=bad?'var(--bad)':''; }
+function upRender(){
+  const i=UP.info, on=DEV.on&&!!i;
+  for(const e of [upSsid,upPass,upRepo,upTok,upSave]) e.disabled=!on||UP.busy;
+  upGo.disabled=!on||UP.busy||(!upSsid.value.trim()&&!(i&&i.ssid));
+  upTokClear.hidden=!(on&&i.hasToken);
+  upPass.placeholder=on&&i.hasPass?'Password saved (type to change)':'Wi-Fi password';
+  upTok.placeholder=on&&i.hasToken?'Token saved (type to change)':'Access token (private repo only)';
+  if(!on){ upMsg(DEV.on?'':'Available when this page is connected to the timer.'); upLast.textContent=''; return; }
+  if(/^Available when/.test(upNote.textContent)) upMsg('');
+  upLast.textContent=i.last==='ok'?'last: updated':(i.last?'last: failed':'v'+i.ver);
+}
+async function upLoad(){
+  if(!DEV.on){ UP.info=null; upRender(); return null; }
+  try{
+    const i=await api('/api/update'); UP.info=i;
+    if(document.activeElement!==upSsid) upSsid.value=i.ssid||'';
+    if(document.activeElement!==upRepo) upRepo.value=i.repo||'';
+    upPass.value=''; upTok.value=''; UP.dirty.pass=UP.dirty.tok=false;
+    upRender(); return i;
+  }catch(e){ upRender(); return null; }
+}
+upPass.addEventListener('input',()=>{ UP.dirty.pass=true; });
+upTok.addEventListener('input',()=>{ UP.dirty.tok=true; });
+upSsid.addEventListener('input',upRender);
+async function upSaveNow(extra){
+  const f=new URLSearchParams(); f.set('ssid',upSsid.value.trim()); f.set('repo',upRepo.value.trim());
+  if(UP.dirty.pass) f.set('pass',upPass.value);
+  if(UP.dirty.tok) f.set('token',upTok.value.trim());
+  if(extra) for(const [k,v] of Object.entries(extra)) f.set(k,v);
+  await api('/api/update/save',{method:'POST',body:f});
+}
+upSave.addEventListener('click',async()=>{
+  try{ await upSaveNow(); await upLoad(); upMsg('Saved on the timer.'); }
+  catch(e){ upMsg('Could not save. Check the repository name and the connection.',true); }
+});
+upTokClear.addEventListener('click',async()=>{
+  try{ await upSaveNow({token:''}); await upLoad(); upMsg('Token removed.'); }catch(e){ upMsg('Could not remove the token.',true); }
+});
+upGo.addEventListener('click',async()=>{
+  if(UP.busy||!DEV.on) return;
+  if(S.state==='run'||S.state==='pause'){ upMsg('Stop the timer first.',true); return; }
+  if(!UP.arm){ UP.arm=setTimeout(()=>{ UP.arm=0; upGoTxt.textContent='Update now'; },3500); upGoTxt.textContent='Tap again to start'; return; }   /* confirm() is unavailable, so two taps */
+  clearTimeout(UP.arm); UP.arm=0; upGoTxt.textContent='Starting…';
+  UP.busy=true; upRender();
+  try{
+    await upSaveNow();
+    await api('/api/update/start',{method:'POST'});
+  }catch(e){
+    UP.busy=false; upGoTxt.textContent='Update now'; upRender();
+    upMsg(/409/.test(String(e))?'The timer is busy. Stop it and try again.':'Could not start. Check the Wi-Fi name and the connection.',true); return;
+  }
+  const before=UP.info&&UP.info.ver;
+  upGoTxt.textContent='Updating…';
+  upMsg('The timer has left its own Wi-Fi to download the update. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If your phone does not rejoin “Beacon-timer” by itself afterwards, rejoin it.');
+  S.state='idle'; S.t=0; releaseWake(); updateButtons();
+  const back=await waitDevice(130,'Updating');
+  UP.busy=false; upGoTxt.textContent='Update now';
+  if(!back){ upMsg('The timer has not come back yet. Rejoin “Beacon-timer” and reload this page; the result will be shown here.',true); upRender(); return; }
+  const i=await upLoad();
+  if(i&&i.last==='ok') upMsg(`Updated: now v${i.ver}${i.from?` (was v${i.from})`:''}.`);
+  else if(i&&i.last) upMsg(UPD_ERR[i.last]||'The update failed.',true);
+  else upMsg(i?'Back online. No update result was recorded.':'');
+});
+upRender();
 
 /* ============ saved timers ============
    A saved timer is the whole timing + light setup under a name. Wiring (pins), brightness limits and the hide-LEDs switch
