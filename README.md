@@ -122,8 +122,9 @@ pulse train; the pulses keep running on the window clock. Both times are in Sett
 ## Saved timers
 
 Settings > **Saved timers**: type a name and tap **Save** to store the current timing, names and light settings. Tap a
-saved timer to load it; the buttons on each row update it with the current settings, rename it, or delete it (update and
-delete ask for a second tap). Up to 20 are kept. Pins, brightness limits and the hide-LEDs switch are not part of a saved
+saved timer to load it. Its name then shows on the timer screen. Changing the loaded timer marks it **Edited** and leaves
+the stored copy as it was until you tap **Save** again (with the name field empty) or the update button on that row.
+**Clear timer** unmounts it from the current screen and does not delete the stored copy. Up to 20 are kept. Pins, brightness limits and the hide-LEDs switch are not part of a saved
 timer, so loading one never changes the wiring settings. On the board the list is stored in its flash (LittleFS), so every
 phone sees the same list; in a plain browser it is kept in that browser.
 

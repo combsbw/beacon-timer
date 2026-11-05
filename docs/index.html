@@ -63,7 +63,12 @@ button{cursor:pointer}
 
 /* timer screen */
 .inst{color:var(--ink);display:flex;flex-direction:column;gap:8px;min-width:0}
-.inst-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.inst-head{display:flex;flex-direction:column;gap:2px;min-width:0}
+.head-main{display:flex;justify-content:space-between;align-items:center;gap:10px;min-width:0}
+.tname{display:flex;align-items:center;gap:8px;min-width:0}
+.tn{font:600 17px/1.1 var(--font-disp);letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.tedit{flex:none;font:600 10px/1 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--busy)}
+.tclear{flex:none;margin-left:auto;border:0;background:transparent;color:var(--muted);font:500 12px var(--font-mono);min-height:32px;padding:0 2px}
 .phase{display:flex;align-items:center;gap:10px;font:600 26px/1 var(--font-disp);letter-spacing:.04em;min-width:0}
 .phase span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{width:14px;height:14px;border-radius:50%;background:#3a4650;flex:none}
@@ -302,11 +307,18 @@ canvas{display:block;width:100%}
     <section id="screenTimer" role="tabpanel" aria-labelledby="tabT">
       <div class="inst" id="inst">
         <div class="inst-head">
-          <div class="phase reveal"><span class="dot" id="phaseDot"></span><span id="phaseName">Ready</span></div>
-          <div class="head-r">
-            <span class="setline reveal" id="setLine">1 / 4</span>
-            <button class="ib" id="blindBtn" type="button" aria-pressed="false" aria-label="Hide numbers"><svg class="ic" id="blindIc"><use href="#i-eye"/></svg></button>
-            <button class="ib" id="fsBtn" type="button" aria-label="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></button>
+          <div class="tname" id="tNameRow" hidden>
+            <span class="tn" id="tName"></span>
+            <span class="tedit" id="tEdit" hidden>Edited</span>
+            <button class="tclear" id="tClear" type="button" aria-label="Clear timer">Clear</button>
+          </div>
+          <div class="head-main">
+            <div class="phase reveal"><span class="dot" id="phaseDot"></span><span id="phaseName">Ready</span></div>
+            <div class="head-r">
+              <span class="setline reveal" id="setLine">1 / 4</span>
+              <button class="ib" id="blindBtn" type="button" aria-pressed="false" aria-label="Hide numbers"><svg class="ic" id="blindIc"><use href="#i-eye"/></svg></button>
+              <button class="ib" id="fsBtn" type="button" aria-label="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></button>
+            </div>
           </div>
         </div>
         <div class="led-wrap"><canvas id="ledCanvas" role="img" aria-label="Simulated LEDs: timer and set"></canvas></div>
@@ -330,6 +342,7 @@ canvas{display:block;width:100%}
           <div class="pbar">
             <input class="txt" id="pName" type="text" maxlength="24" placeholder="Name this timer" aria-label="Name for a new saved timer" enterkeyhint="done">
             <button class="rbtn" id="pAdd" type="button"><svg class="ic"><use href="#i-plus"/></svg><span>Save</span></button>
+            <button class="rbtn" id="pClear" type="button" hidden>Clear timer</button>
           </div>
           <div id="pList" class="plist"></div>
           <p class="note" id="pMsg" aria-live="polite"></p>
@@ -1556,10 +1569,22 @@ async function presetsStore(next){                                    /* returns
 }
 const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 function setActive(id){ P.active=id; try{ if(id) localStorage.setItem(ACTIVE_KEY,id); else localStorage.removeItem(ACTIVE_KEY); }catch(e){} }
+function loadedPreset(){ return P.list.find(x=>x.id===P.active)||null; }
+function presetDirty(it){ return !!(it&&presetKey(it.cfg)!==presetKey(cfg)); }
+function renderLoaded(){
+  const it=loadedPreset(), row=$('#tNameRow'), clear=$('#pClear');
+  if(!it){ row.hidden=true; clear.hidden=true; return; }
+  row.hidden=false; clear.hidden=false;
+  $('#tName').textContent=it.name;
+  $('#tEdit').hidden=!presetDirty(it);
+}
+function clearLoaded(){ if(!P.active) return; setActive(null); renderPresets(); }
 async function presetCreate(){
-  const inp=$('#pName'); let name=inp.value.trim().slice(0,24);
+  const inp=$('#pName'); const typed=inp.value.trim().slice(0,24);
+  const cur=loadedPreset();
+  if(cur&&(!typed||typed===cur.name)){ inp.value=''; await presetUpdate(cur.id); return; }   /* empty Save writes the loaded timer; a different name stores a new one */
   if(P.list.length>=PRESET_MAX){ presetMsg(`Up to ${PRESET_MAX} saved timers. Delete one to add another.`,true); return; }
-  if(!name) name='Timer '+(P.list.length+1);
+  const name=typed||('Timer '+(P.list.length+1));
   const item={id:newId(),name,cfg:presetCfg(cfg)};
   if(await presetsStore([...P.list,item])){ inp.value=''; setActive(item.id); presetMsg(`Saved "${name}".`); }
   renderPresets();
@@ -1594,9 +1619,11 @@ function twoTap(btn,armed,fn){
   });
 }
 function renderPresets(){
+  if(P.active&&!P.list.some(x=>x.id===P.active)) setActive(null);
+  renderLoaded();
   const box=$('#pList'); box.textContent='';
-  const act=P.list.find(x=>x.id===P.active);
-  $('#sum-presets').textContent=act?act.name:(P.list.length?`${P.list.length} saved`:'');
+  const act=loadedPreset();
+  $('#sum-presets').textContent=act?(act.name+(presetDirty(act)?' · edited':'')):(P.list.length?`${P.list.length} saved`:'');
   if(!P.list.length){ const n=el('p','note'); n.textContent='Nothing saved yet. Set the timer up the way you like, name it above and tap Save.'; box.append(n); return; }
   const snap=presetKey(cfg);
   for(const it of P.list){
@@ -1612,7 +1639,7 @@ function renderPresets(){
     const load=el('button','pload'); load.type='button'; load.setAttribute('aria-label','Load '+it.name);
     const n=el('span','pn'); n.textContent=it.name;
     const c=normalize(it.cfg), mod=it.id===P.active&&presetKey(it.cfg)!==snap;
-    const sub=el('span','ps'); sub.textContent=`${fmtDur(c.loadSec)} load · ${c.sets}×${c.repeat} · ${fmtDur(buildWindows(c).total)}${mod?' · changed':''}`;
+    const sub=el('span','ps'); sub.textContent=`${fmtDur(c.loadSec)} load · ${c.sets}×${c.repeat} · ${fmtDur(buildWindows(c).total)}${mod?' · edited':''}`;
     load.append(n,sub);
     const live=()=>S.state==='run'||S.state==='pause';
     load.addEventListener('click',()=>{
@@ -1631,6 +1658,8 @@ function renderPresets(){
 }
 $('#pAdd').addEventListener('click',presetCreate);
 $('#pName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); presetCreate(); } });
+$('#pClear').addEventListener('click',clearLoaded);
+$('#tClear').addEventListener('click',clearLoaded);
 
 /* ============ boot ============ */
 function rebuildAll(){
