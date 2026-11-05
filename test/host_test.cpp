@@ -23,11 +23,11 @@ static int dump(const char* path) {
   Config c; bool pinsOk = true;
   if (!cfgFromJson(js.c_str(), js.size(), c, &pinsOk)) { printf("PARSE FAIL\n"); return 1; }
   Plan pl; buildPlan(c, pl);
-  Rgb sc[MAX_SETS]; setColors(c.sets, sc);
+  Rgb sc[MAX_SETS]; setColors(trackN(c), sc);
   printf("PINS %d %d,%d,%d,%d,%d %d,%d,%d,%d,%d\n", pinsOk ? 1 : 0, c.pins[0].r, c.pins[0].g, c.pins[0].b, c.pins[0].com, c.pins[0].anode, c.pins[1].r, c.pins[1].g, c.pins[1].b, c.pins[1].com, c.pins[1].anode);
   printf("PLAN %d %.3f\n", pl.n, pl.total);
   for (int i = 0; i < pl.n; i++) { Win w = winAt(pl, i); printf("W %d %d %d %d %.3f %.3f\n", i, w.type, w.set, w.rep, w.len, w.start); }
-  for (int i = 0; i < c.sets; i++) printf("C %d %.3f %.3f %.3f\n", i, sc[i].r, sc[i].g, sc[i].b);
+  for (int i = 0; i < trackN(c); i++) printf("C %d %.3f %.3f %.3f\n", i, sc[i].r, sc[i].g, sc[i].b);
   for (int i = 0; i < pl.n; i++) {
     Win w = winAt(pl, i);
     for (int k = 0; k < 64; k++) {
@@ -142,6 +142,57 @@ static int stateTest() {
     CHECK(tr.b < 1.f || tr.c.r != 34.f);                          // transitions have no solid start
     Config sc = lc; sc.load.solid = 0; sc.load.fade = 0;          // switched off: pulses from the first moment
     CHECK(fabsf(led1(sc, Win{W_LOAD, 1, 1, 30.0, 0.0}, 1.0).b - pulseLed(sc.load, 30.0, 1.0, sc.maxHz).b) < 1e-6f);
+  }
+
+  // long loads: paced rates (pulses per minute), a steady stretch before the ramp, time marks
+  {
+    Config lc; lc.setDefaults();
+    lc.load.paced = true; lc.load.pace0 = 6; lc.load.pace1 = 60; lc.load.rampAt = 40; lc.load.markEvery = 60;
+    lc.load.solid = 3; lc.load.fade = 1;
+    Win w{W_LOAD, 1, 1, 1200.0, 0.0};
+    Accel steady = accelOf(0.3 * 1200.0, 1200.0, 0.1, 1.0, 3, 0.4);       // inside the first 40%: constant starting rate
+    CHECK(steady.q == 0.f && fabs(steady.cyc - 0.1 * 360.0) < 1e-9);
+    Accel end = accelOf(1200.0, 1200.0, 0.1, 1.0, 3, 0.4);                 // closed form: 0.1*1200 + 0.9 * 720/4
+    CHECK(fabs(end.cyc - (120.0 + 0.9 * 720.0 / 4.0)) < 1e-9 && end.q == 1.f);
+    CHECK(led1(lc, w, 60.05).b == 1.f);                                    // first mark: flash, gap, flash, dark
+    CHECK(led1(lc, w, 60.2).b == 0.f && led1(lc, w, 60.3).b == 1.f && led1(lc, w, 60.45).b == 0.f);
+    CHECK(led1(lc, w, 120.05).b == 1.f);
+    CHECK(led1(lc, w, 30.1).b == pulseLed(lc.load, 1200.0, 30.1, lc.maxHz).b);      // no mark before the first interval
+    CHECK(led1(lc, w, 1199.0).b == pulseLed(lc.load, 1200.0, 1199.0, lc.maxHz).b);
+    Config nm = lc; nm.load.markEvery = 0;
+    CHECK(led1(nm, w, 60.2).b == pulseLed(nm.load, 1200.0, 60.2, nm.maxHz).b);
+    // pulse rate follows pulses per minute: 6/min = one pulse per 10 s while steady
+    Config pc; pc.setDefaults(); pc.load.paced = true; pc.load.solid = 0; pc.load.fade = 0; pc.load.markEvery = 0; pc.load.glow = 0;
+    pc.load.duty0 = pc.load.duty1 = 50; pc.load.soft0 = pc.load.soft1 = 100; pc.load.rampAt = 90;
+    Led lit = led1(pc, w, 2.5), dark = led1(pc, w, 7.5);                   // 2.5 s = 25% of a 10 s cycle (lit), 7.5 s = 75% (dark)
+    CHECK(lit.b > 0.9f && dark.b < 0.05f);
+  }
+
+  // LED 2 follows the repeat when asked
+  {
+    Config tc; tc.setDefaults(); tc.trackRepeats = true;
+    Rgb rc[MAX_SETS]; setColors(trackN(tc), rc);
+    CHECK(trackN(tc) == 4);
+    Rgb sc[MAX_SETS]; setColors(tc.sets, sc);
+    Led a = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, rc);                     // set 3 of repeat 1: the repeat color, not the set color
+    CHECK(a.c.r == rc[0].r && a.c.g == rc[0].g);
+    Led b = led2(tc, Win{W_LOAD, 5, 2, 30.0, 0.0}, rc);
+    CHECK(b.c.r == rc[1].r && b.c.g == rc[1].g && b.c.b == rc[1].b);
+    Led t1 = led2(tc, Win{W_TRANS, 2, 2, 15.0, 0.0}, rc);                    // between sets of repeat 2: still repeat 2
+    CHECK(t1.c.r == rc[1].r && t1.c.g == rc[1].g);
+    Led t2 = led2(tc, Win{W_TRANS, 5, 2, 15.0, 0.0}, rc);                    // closing transition of repeat 2: leads into repeat 3
+    CHECK(t2.c.r == rc[2].r && t2.c.g == rc[2].g && t2.c.b == rc[2].b);
+    Led ld = led2(tc, Win{W_LEAD, 0, 1, 15.0, 0.0}, rc);                     // lead-in: repeat 1
+    CHECK(ld.c.r == rc[0].r && ld.c.g == rc[0].g);
+    tc.trackRepeats = false;
+    Led sb = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, sc);
+    CHECK(sb.c.r == sc[2].r && sb.c.g == sc[2].g);
+    Config pj; bool ok3 = true;
+    const char* jt = "{\"trackRepeats\":true,\"loadSec\":5000,\"profiles\":{\"load\":{\"paced\":true,\"pace0\":0,\"pace1\":900,\"rampAt\":95,\"markEvery\":5}}}";
+    CHECK(cfgFromJson(jt, strlen(jt), pj, &ok3) && pj.trackRepeats && pj.loadSec == 1200.f && pj.load.paced && pj.load.pace0 == 1.f &&
+          pj.load.pace1 == 300.f && pj.load.rampAt == 90.f && pj.load.markEvery == 10.f);
+    Engine ee; ee.configure(pj);
+    CHECK(ee.state == ST_IDLE && ee.plan.total > 1200.0);
   }
 
   // settings parser: defaults on {}, clamping, bad pins, bad json

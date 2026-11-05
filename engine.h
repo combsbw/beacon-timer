@@ -69,11 +69,13 @@ inline float pulseShape(float x, float duty, float soft) {
 // Accelerating rate f(p) = f0 + (f1 - f0) * p^n. q = p^n is the same curve as a 0..1 share (duty and softness follow it);
 // cyc is the closed-form integral of the rate, i.e. the pulse phase in cycles. No accumulator, so it can be scrubbed.
 struct Accel { float q; double cyc; };
-inline Accel accelOf(double local, double len, double f0, double f1, int n) {
-  double p = clampd(local / len, 0.0, 1.0), pn = pow(p, (double)n);
+// `hold` = share of the window that keeps the starting rate before the ramp begins (0 = ramp from the start).
+inline Accel accelOf(double local, double len, double f0, double f1, int n, double hold = 0.0) {
+  double p = clampd(local / len, 0.0, 1.0), u = hold > 0.0 ? clampd((p - hold) / (1.0 - hold), 0.0, 1.0) : p;
+  double pn = pow(u, (double)n), k = len * (1.0 - hold);
   Accel a;
   a.q = (float)pn;
-  a.cyc = f0 * local + (f1 - f0) * len / (double)(n + 1) * pn * p;
+  a.cyc = f0 * local + (f1 - f0) * k / (double)(n + 1) * pn * u;
   return a;
 }
 
@@ -81,6 +83,10 @@ struct Profile {
   float rate0, rate1;          // pulses per window at the start and end (load)
   int curve;                   // 1 linear, 2 squared, 3 cubic
   float duty0, duty1, soft0, soft1;   // percent
+  bool paced;                  // load: rates are pulses per minute (pace0/pace1) instead of pulses per window (rate0/rate1)
+  float pace0, pace1;          // pulses per minute
+  float rampAt;                // percent of the window that keeps the starting rate before the ramp begins
+  float markEvery;             // seconds between time-mark double flashes (0 = off)
   float solid, fade;           // load: seconds of solid first color at the start of the window, then the fade into the pulses
   float glow;                  // percent, the dim level between pulses ("floor" in the UI)
   float blend;                 // percent, color crossfade
@@ -93,6 +99,7 @@ struct PinCfg { int8_t r, g, b, com; bool anode; };
 
 struct Config {
   float loadSec, transSec;
+  bool trackRepeats;           // LED 2 follows the repeat (not the set)
   int sets, repeat;            // repeat = how many times the whole run of sets plays (1 = no repeat)
   float redHold;
   bool skipFinal, lead, leadSame;
@@ -112,14 +119,14 @@ struct Config {
     return p;
   }
   void setDefaults() {
-    loadSec = 30; transSec = 15; sets = 5; repeat = 4; redHold = 2; skipFinal = true; lead = true; leadSame = true; leadSec = 15;
+    loadSec = 30; transSec = 15; sets = 5; repeat = 4; trackRepeats = false; redHold = 2; skipFinal = true; lead = true; leadSame = true; leadSec = 15;
     holdMs = 0; maxHz = 7; master = 100;
     pins[0] = PinCfg{13, 11, 10, 12, true};    // timer LED: R=13 G=11 B=10, common anode on 12
     pins[1] = PinCfg{2, 4, 5, 3, true};        // set LED:   R=2  G=4  B=5,  common anode on 3
     Profile l;
     memset(&l, 0, sizeof l);
     l.rate0 = 10; l.rate1 = 150; l.curve = 3; l.duty0 = 60; l.duty1 = 30; l.soft0 = 100; l.soft1 = 0;
-    l.solid = 3; l.fade = 1; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
+    l.solid = 3; l.fade = 1; l.paced = false; l.pace0 = 6; l.pace1 = 60; l.rampAt = 0; l.markEvery = 0; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
     l.nColors = 4; l.colors[0] = hex(0x22e070); l.colors[1] = hex(0xffd51a); l.colors[2] = hex(0xff7a14); l.colors[3] = hex(0xff1f2d);
     load = l;
     trans = transDefaults();
@@ -237,14 +244,20 @@ struct Led { Rgb c; float b; };    // color 0..255 per channel, brightness 0..1
 
 inline Led pulseLed(const Profile& pr, double len, double local, float maxHz) {
   float p = (float)(local / len);
-  double f0 = fmin((double)pr.rate0 / len, (double)maxHz), f1 = fmin((double)pr.rate1 / len, (double)maxHz);
-  Accel a = accelOf(local, len, f0, f1, pr.curve);
+  double f0 = fmin(pr.paced ? (double)pr.pace0 / 60.0 : (double)pr.rate0 / len, (double)maxHz);
+  double f1 = fmin(pr.paced ? (double)pr.pace1 / 60.0 : (double)pr.rate1 / len, (double)maxHz);
+  Accel a = accelOf(local, len, f0, f1, pr.curve, (double)pr.rampAt / 100.0);
   float x = (float)(a.cyc - floor(a.cyc));
   float w = pulseShape(x, lerpf(pr.duty0, pr.duty1, a.q) / 100.f, lerpf(pr.soft0, pr.soft1, a.q) / 100.f);
   float fl = pr.glow / 100.f, b = fl + (1.f - fl) * w;
   float S = (float)fmin((double)pr.solid, len * 0.5), F = (float)fmin((double)pr.fade, len * 0.25);
   if (local < S) b = 1.f;                                    // solid start, then it fades out into the pulses (which run on the window clock)
   else if (local < S + F) b = 1.f + (b - 1.f) * smoothf(S, S + F, (float)local);
+  // time marks: a quick double flash every markEvery seconds, so a long window still tells you how far along you are
+  if (pr.markEvery > 0.f && local >= (double)pr.markEvery && len - local >= 2.0) {
+    double m = fmod(local, (double)pr.markEvery);
+    if (m < 0.5) b = (m < 0.12 || (m >= 0.25 && m < 0.37)) ? 1.f : 0.f;
+  }
   return Led{gradientAt(pr.colors, pr.nColors, p, pr.blend / 100.f), b};
 }
 
@@ -291,7 +304,12 @@ inline SetRep nextOf(const Config& c, const Win& w) {
   return SetRep{w.set + 1, w.rep};
 }
 inline int setOf(const Config& c, const Win& w) { return nextOf(c, w).set; }
-inline Led led2(const Config& c, const Win& w, const Rgb* setCols) { return Led{setCols[setOf(c, w) - 1], 0.85f}; }
+// How many colors LED 2 steps through: one per set, or one per repeat.
+inline int trackN(const Config& c) { return c.trackRepeats ? c.repeat : c.sets; }
+inline Led led2(const Config& c, const Win& w, const Rgb* setCols) {
+  SetRep n = nextOf(c, w);
+  return Led{setCols[(c.trackRepeats ? n.rep : n.set) - 1], 0.85f};
+}
 
 // ---- timer state machine ------------------------------------------------------------------------------------------
 enum State : uint8_t { ST_IDLE = 0, ST_RUN, ST_PAUSE, ST_PREVIEW, ST_DONE, ST_STOPPED };
@@ -318,7 +336,7 @@ class Engine {
   Engine() : state(ST_IDLE), baseT_(0), runUs_(0) {
     cfg.setDefaults();
     buildPlan(cfg, plan);
-    setColors(cfg.sets, setCols);
+    setColors(trackN(cfg), setCols);
   }
 
   // Take new settings. A changed plan (timing, lead-in, hold, final transition) resets the timer; style changes don't.
@@ -328,7 +346,7 @@ class Engine {
     bool same = planEqual(plan, np);
     cfg = c;
     plan = np;
-    setColors(cfg.sets, setCols);
+    setColors(trackN(cfg), setCols);
     if (!same) reset();
     else if (baseT_ > plan.total - 0.001) baseT_ = plan.total - 0.001;
   }

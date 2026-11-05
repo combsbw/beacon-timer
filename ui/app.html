@@ -125,6 +125,8 @@ canvas{display:block;width:100%}
 .srow{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px}
 .sl{display:flex;align-items:center;gap:10px;font-weight:500;min-width:0}
 .sl .ic{color:var(--muted)}
+.hint{display:block;font:400 11px var(--font-mono);color:var(--muted);line-height:1.1}
+.hint:empty{display:none}
 .step{display:flex;align-items:center;gap:6px;flex:none}
 .sb{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--field);display:grid;place-items:center}
 .sb .ic{width:18px;height:18px}
@@ -350,7 +352,7 @@ canvas{display:block;width:100%}
       <details class="sec" id="sec-led">
         <summary><svg class="ic"><use href="#i-sun"/></svg><span class="st">LEDs</span><span class="sum" id="sum-led"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
         <div class="sbody" id="ledBox">
-          <div class="chips" id="chips" aria-label="Set colors"></div>
+          <div class="chips" id="chips" aria-label="Colors of the second LED"></div>
         </div>
       </details>
 
@@ -418,7 +420,8 @@ function pulseShape(x,duty,soft){
   const u=x/duty, e=clamp(soft*0.5,0.015,0.5);
   return smooth(0,e,u)*(1-smooth(1-e,1,u));
 }
-const fmtDur=s=>{ s=Math.round(s); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
+const p2=n=>String(n).padStart(2,'0');
+const fmtDur=s=>{ s=Math.round(s); return s>=3600?`${Math.floor(s/3600)}:${p2(Math.floor(s%3600/60))}:${p2(s%60)}`:`${Math.floor(s/60)}:${p2(s%60)}`; };
 const fmtN=n=>(Math.round(n*10)/10).toString();
 const ICON=(n,extra)=>`<svg class="ic${extra?' '+extra:''}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
 function el(tag,cls,html){ const e=document.createElement(tag); if(cls) e.className=cls; if(html!=null) e.innerHTML=html; return e; }
@@ -430,9 +433,10 @@ const CURVES=[[1,'Linear'],[2,'Squared'],[3,'Cubic']];
 
 /* Accelerating rate: f(p) = f0 + (f1 - f0) * p^n. `q` is the same curve as a 0..1 share, so duty cycle and
    edge softness move along with the rate. `cyc` is the closed-form integral of the rate (pulse phase in cycles). */
-function accel(local,len,f0,f1,n){
-  const p=clamp(local/len,0,1);
-  return {q:Math.pow(p,n),cyc:f0*local+(f1-f0)*len/(n+1)*Math.pow(p,n+1)};
+/* a = share of the window that keeps the starting rate before the ramp begins (0 = ramp from the start). Closed form, so it can be scrubbed. */
+function accel(local,len,f0,f1,n,a=0){
+  const p=clamp(local/len,0,1), u=a>0?clamp((p-a)/(1-a),0,1):p, k=len*(1-a);
+  return {q:Math.pow(u,n),cyc:f0*local+(f1-f0)*k/(n+1)*Math.pow(u,n+1)};
 }
 
 /* Load window: accelerating pulse. Rate, duty cycle and edge softness all run as percentages of the window. */
@@ -441,9 +445,13 @@ const PULSE={
     {g:'Start of window'},
     {k:'solid',l:'Solid',min:0,max:10,step:0.5,u:' s'},
     {k:'fade',l:'Fade',min:0,max:5,step:0.5,u:' s'},
-    {g:'Rate per window'},
-    {k:'rate0',l:'Start',min:1,max:60,step:1,u:''},
-    {k:'rate1',l:'End',min:2,max:300,step:1,u:''},
+    {g:'Rate'},
+    {k:'paced',l:'Per',choice:[[false,'Window'],[true,'Minute']],redo:true},
+    {k:'rate0',l:'Start',min:1,max:60,step:1,u:'',when:p=>!p.paced},
+    {k:'rate1',l:'End',min:2,max:300,step:1,u:'',when:p=>!p.paced},
+    {k:'pace0',l:'Start',min:1,max:300,step:1,u:' /min',when:p=>p.paced},
+    {k:'pace1',l:'End',min:1,max:300,step:1,u:' /min',when:p=>p.paced},
+    {k:'rampAt',l:'Steady',min:0,max:90,step:5,u:'%'},
     {k:'curve',l:'Curve',choice:CURVES},
     {g:'Duty'},
     {k:'duty0',l:'Start',min:5,max:95,step:1,u:'%'},
@@ -453,21 +461,25 @@ const PULSE={
     {k:'soft1',l:'End',min:0,max:100,step:1,u:'%'},
     {g:'Light'},
     {k:'floor',l:'Glow',min:0,max:40,step:1,u:'%'},
-    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'}
+    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'},
+    {g:'Time marks (long windows)'},
+    {k:'markEvery',l:'Every',min:0,max:600,step:10,u:' s',off:'off'}
   ],
   segments:prof=>prof.colors.length,
   first:prof=>hexToRgb(prof.colors[0]),
   colorAt:(prof,p)=>gradientAt(stopsOf(prof),p,prof.blend/100),
   led(win,local,prof,G){
     const L=win.len,p=local/L;
-    const f0=Math.min(prof.rate0/L,G.maxHz), f1=Math.min(prof.rate1/L,G.maxHz);
-    const a=accel(local,L,f0,f1,prof.curve);
+    const f0=Math.min((prof.paced?prof.pace0/60:prof.rate0/L),G.maxHz), f1=Math.min((prof.paced?prof.pace1/60:prof.rate1/L),G.maxHz);
+    const a=accel(local,L,f0,f1,prof.curve,prof.rampAt/100);
     const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
     const fl=prof.floor/100;
     let b=fl+(1-fl)*w;
     /* the first seconds are a solid light in the first color, then it fades out into the pulse train (which keeps running on the window clock) */
     const S=Math.min(prof.solid,L*0.5), F=Math.min(prof.fade,L*0.25);
     if(local<S) b=1; else if(local<S+F) b=1+(b-1)*smooth(S,S+F,local);
+    /* time marks: a quick double flash every markEvery seconds, so a long window still tells you how far along you are */
+    if(prof.markEvery>0&&local>=prof.markEvery&&L-local>=2){ const m=local%prof.markEvery; if(m<0.5) b=(m<0.12||(m>=0.25&&m<0.37))?1:0; }
     return {c:gradientAt(stopsOf(prof),p,prof.blend/100),b};
   }
 };
@@ -523,14 +535,14 @@ const PIN_CHOICES=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,21];   /* S3 GPI
 function transProfile(){ return {breath:2,floor:6,tail:5,f0:1,f1:7,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,blend:40,colors:[...PAL.trans]}; }
 function defaults(){
   return {
-    loadSec:30,transSec:15,sets:5,repeat:4,redHold:2,skipFinal:true,
+    loadSec:30,transSec:15,sets:5,repeat:4,trackRepeats:false,redHold:2,skipFinal:true,
     lead:true,leadSame:true,leadSec:15,
     names:{load:'Load',trans:'Transition',lead:'Lead-in',hold:'Hold'},
     loadNames:{},transNames:{},
     holdMs:0,maxHz:7,master:100,blind:false,
     pins:{timer:{r:13,g:11,b:10,com:12,anode:true},set:{r:2,g:4,b:5,com:3,anode:true}},
     profiles:{
-      load:{solid:3,fade:1,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
+      load:{solid:3,fade:1,paced:false,pace0:6,pace1:60,rampAt:0,markEvery:0,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
       trans:transProfile(),
       lead:transProfile()
     }
@@ -556,8 +568,9 @@ function normalize(raw){
     for(const k of ['loadNames','transNames']){ const o=raw[k]; if(o&&typeof o==='object') for(const [i,v] of Object.entries(o)) if(/^\d{1,2}$/.test(i)&&typeof v==='string') d[k][i]=v.slice(0,24); }
   }
   for(const k of Object.keys(d.names)) d.names[k]=String(d.names[k]).slice(0,24);
-  d.loadSec=clamp(d.loadSec,3,600); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
+  d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
   d.profiles.load.solid=clamp(d.profiles.load.solid,0,10); d.profiles.load.fade=clamp(d.profiles.load.fade,0,5);
+  { const L=d.profiles.load; L.pace0=clamp(L.pace0,1,300); L.pace1=clamp(L.pace1,1,300); L.rampAt=clamp(L.rampAt,0,90); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); }
   d.leadSec=clamp(d.leadSec,1,600); d.holdMs=clamp(d.holdMs,0,1000); d.maxHz=clamp(d.maxHz,1,8); d.master=clamp(d.master,10,100);
   const dp=defaults().pins;
   for(const k of ['timer','set']){
@@ -639,7 +652,8 @@ function setColors(N){
   const out=[]; for(let i=0;i<N;i++){ const fromEnd=N-1-i; out.push(fromEnd<3?tail[2-fromEnd]:extraColor(fromEnd-3)); }
   return out;
 }
-let PLAN=buildWindows(cfg), SET_COLORS=setColors(cfg.sets);
+const trackN=c=>c.trackRepeats?c.repeat:c.sets;      /* how many colors LED 2 steps through: one per set, or one per repeat */
+let PLAN=buildWindows(cfg), SET_COLORS=setColors(trackN(cfg));
 
 /* ============ LED outputs ============ */
 function led1(c,win,local){
@@ -657,7 +671,7 @@ function nextOf(c,win){
   return win.set>=c.sets?{set:1,rep:Math.min(c.repeat,win.rep+1)}:{set:win.set+1,rep:win.rep};
 }
 const setOf=(c,win)=>nextOf(c,win).set;
-function led2(c,win){ return {c:SET_COLORS[setOf(c,win)-1],b:0.85}; }   /* solid color for the set */
+function led2(c,win){ const n=nextOf(c,win); return {c:SET_COLORS[(c.trackRepeats?n.rep:n.set)-1],b:0.85}; }   /* solid color for the set, or for the repeat */
 
 /* ============ timer state ============ */
 const S={state:'idle',t:0,wake:null};
@@ -722,7 +736,7 @@ function drawStage(o1,o2){
   const room=cx=>Math.min(cy-2,H-cy-2,cx-2,W-cx-2);
   drawLed(ledG,x1,cy,r1,{c:o1.c,b:o1.b*m,room:room(x1)}); drawLed(ledG,x2,cy,r2,{c:o2.c,b:o2.b*m,room:room(x2)});
   ledG.fillStyle=TH.muted; ledG.font='500 11px "IBM Plex Mono",ui-monospace,monospace'; ledG.textAlign='center';
-  ledG.fillText('TIMER',x1,cy+r1*1.17+22); ledG.fillText('SET',x2,cy+r2*1.17+22);
+  ledG.fillText('TIMER',x1,cy+r1*1.17+22); ledG.fillText(cfg.trackRepeats?'REPEAT':'SET',x2,cy+r2*1.17+22);
 }
 
 let mapCache=null,mapKey='';
@@ -820,7 +834,7 @@ const elDot=$('#phaseDot'), elPhase=$('#phaseName'), elSet=$('#setLine'), elOf=$
 /* Plain stopwatch digits, redrawn on every animation frame (the display refresh rate), so a new tenth appears the moment it changes. */
 function setRemain(rem){
   const T=Math.ceil(Math.max(0,rem)*10-1e-9), sec=Math.floor(T/10);
-  setText(rMain,`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`); setText(rTenth,'.'+(T%10));
+  setText(rMain,fmtDur(sec)); setText(rTenth,'.'+(T%10));
 }
 const timerScreen=$('#screenTimer');
 
@@ -919,12 +933,13 @@ $('#tabS').addEventListener('click',()=>showTab('set'));
 
 /* ============ settings: shared pieces ============ */
 let uid=0;
-function rangeRow(label,min,max,step,unit,get,set){
+function rangeRow(label,min,max,step,unit,get,set,off){
   const row=el('div','rr'), id='rg'+(++uid);
   const lab=el('label'); lab.htmlFor=id; lab.textContent=label;
   const inp=el('input'); inp.type='range'; inp.id=id; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
-  const out=el('output'); out.textContent=get()+unit;
-  inp.addEventListener('input',()=>{ const v=Number(inp.value); set(v); out.textContent=v+unit; });
+  const show=v=>(off&&v===0)?off:v+unit;
+  const out=el('output'); out.textContent=show(get());
+  inp.addEventListener('input',()=>{ const v=Number(inp.value); set(v); out.textContent=show(v); });
   row.append(lab,inp,out); return row;
 }
 function switchEl(checked,onChange,label){
@@ -946,7 +961,7 @@ function drawPreviews(){
   }
 }
 function updateSummaries(){
-  $('#sum-timing').textContent=`${cfg.loadSec}s · ${cfg.transSec}s · ${cfg.sets}×${cfg.repeat}`;
+  $('#sum-timing').textContent=`${cfg.loadSec>=60?fmtDur(cfg.loadSec):cfg.loadSec+'s'} · ${cfg.transSec}s · ${cfg.sets}×${cfg.repeat}`;
   $('#sum-names').textContent=`${cfg.names.load||'Load'} · ${cfg.names.trans||'Transition'}`;
   setText($('#stLoad'),cfg.names.load||'Load'); setText($('#stTrans'),cfg.names.trans||'Transition'); setText($('#stLead'),cfg.names.lead||'Lead-in');
   for(const k of ['load','trans','lead']) $('#gr-'+k).style.background=`linear-gradient(90deg,${cfg.profiles[k].colors.join(',')})`;
@@ -958,10 +973,11 @@ document.querySelectorAll('#screenSet details').forEach(d=>d.addEventListener('t
 
 /* ============ settings: timing ============ */
 const ROWS=[
-  {id:'loadSec',label:'Load',icon:'pulse',type:'step',min:3,max:600,step:5,unit:'s'},
+  {id:'loadSec',label:'Load',icon:'pulse',type:'step',min:3,max:1200,step:5,unit:'s',dyn:true,hint:true},
   {id:'transSec',label:'Transition',icon:'wave',type:'step',min:0,max:600,step:5,unit:'s'},
   {id:'sets',label:'Sets',icon:'repeat',type:'step',min:1,max:20,step:1,unit:'',int:true},
   {id:'repeat',label:'Repeat',icon:'loop',type:'step',min:1,max:20,step:1,unit:'×',int:true},
+  {id:'trackRepeats',label:'Set LED',icon:'dot',type:'seg',opts:[[false,'Sets'],[true,'Repeats']]},
   {id:'redHold',label:'Hold',icon:'dot',iconCls:'red',type:'step',min:0,max:10,step:0.5,unit:'s'},
   {id:'lead',label:'Lead-in',icon:'flag',type:'switch'},
   {id:'leadSame',label:'Same as transition',icon:'link',type:'switch',when:()=>cfg.lead},
@@ -969,23 +985,30 @@ const ROWS=[
   {id:'finalTrans',label:'Final transition',icon:'wave',type:'switch',get:()=>!cfg.skipFinal,set:v=>{ cfg.skipFinal=!v; }}
 ];
 const timingCtl={};
+/* which color LED 2 follows changes nothing about the timing, so it must not reset a running timer */
+function commitTrack(){ SET_COLORS=setColors(trackN(cfg)); renderLegend(); touch(); }
 function commitTiming(){
-  PLAN=buildWindows(cfg); SET_COLORS=setColors(cfg.sets);
+  PLAN=buildWindows(cfg); SET_COLORS=setColors(trackN(cfg));
   updateTotals(); renderLegend(); renderSetNames(); syncTiming(); doReset(); touch();
 }
 function buildTiming(){
   const box=$('#timingBox'); box.textContent='';
   for(const r of ROWS){
     const row=el('div','srow'); row.id='row-'+r.id;
-    row.append(el('span','sl',`${ICON(r.icon,r.iconCls)}<span>${r.label}</span>`));
+    row.append(el('span','sl',`${ICON(r.icon,r.iconCls)}<span>${r.label}${r.hint?'<small class="hint"></small>':''}</span>`));
     if(r.type==='step'){
       const wrap=el('div','step'), minus=el('button','sb',ICON('minus')), plus=el('button','sb',ICON('plus')), inp=el('input');
       minus.type=plus.type='button'; minus.setAttribute('aria-label',r.label+' less'); plus.setAttribute('aria-label',r.label+' more');
       inp.type='number'; inp.inputMode='decimal'; inp.min=r.min; inp.max=r.max; inp.step=r.step; inp.setAttribute('aria-label',r.label);
       const apply=v=>{ if(!isFinite(v)){ inp.value=cfg[r.id]; return; } v=clamp(v,r.min,r.max); v=r.int?Math.round(v):Math.round(v*2)/2; cfg[r.id]=v; inp.value=v; commitTiming(); };
-      minus.addEventListener('click',()=>apply(cfg[r.id]-r.step)); plus.addEventListener('click',()=>apply(cfg[r.id]+r.step));
+      const dyn=v=>v>=300?30:v>=120?15:5;     /* long windows step in bigger jumps; type a value for anything exact */
+      minus.addEventListener('click',()=>apply(cfg[r.id]-(r.dyn?dyn(cfg[r.id]-1):r.step))); plus.addEventListener('click',()=>apply(cfg[r.id]+(r.dyn?dyn(cfg[r.id]):r.step)));
       inp.addEventListener('change',()=>apply(parseFloat(inp.value)));
       wrap.append(minus,inp,plus,el('span','unit',r.unit)); row.append(wrap); timingCtl[r.id]={inp};
+    }else if(r.type==='seg'){
+      const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',r.label); seg.style.maxWidth='190px';
+      const btns=r.opts.map(([v,t])=>{ const b=el('button',null,t); b.type='button'; b.addEventListener('click',()=>{ cfg[r.id]=v; syncTiming(); commitTrack(); }); seg.append(b); return [v,b]; });
+      row.append(seg); timingCtl[r.id]={seg:btns};
     }else{
       const get=r.get||(()=>cfg[r.id]), set=r.set||(v=>{ cfg[r.id]=v; });
       const sw=switchEl(get(),v=>{ set(v); commitTiming(); },r.label); row.append(sw); timingCtl[r.id]={sw:sw.firstChild,get};
@@ -995,7 +1018,9 @@ function buildTiming(){
 }
 function syncTiming(){
   for(const r of ROWS){
-    const c=timingCtl[r.id]; if(c.inp) c.inp.value=cfg[r.id]; else c.sw.checked=c.get();
+    const c=timingCtl[r.id];
+    if(c.inp) c.inp.value=cfg[r.id]; else if(c.seg) c.seg.forEach(([v,b])=>b.setAttribute('aria-pressed',cfg[r.id]===v)); else c.sw.checked=c.get();
+    if(r.hint){ const h=$('#row-'+r.id+' .hint'); h.textContent=cfg[r.id]>=60?fmtDur(cfg[r.id]):''; }
     $('#row-'+r.id).hidden=r.when?!r.when():false;
   }
   $('#sec-lead').hidden=!(cfg.lead&&!cfg.leadSame);
@@ -1008,7 +1033,7 @@ function renderLegend(){
   const box=$('#chips'); box.textContent='';
   SET_COLORS.forEach((c,i)=>{
     const d=el('span','chip',String(i+1)); d.style.background=rgbCss(c);
-    const lum=0.2126*c[0]+0.7152*c[1]+0.0722*c[2]; d.style.color=lum>130?'#000':'#fff'; d.title='Set '+(i+1); box.append(d);
+    const lum=0.2126*c[0]+0.7152*c[1]+0.0722*c[2]; d.style.color=lum>130?'#000':'#fff'; d.title=(cfg.trackRepeats?'Repeat ':'Set ')+(i+1); box.append(d);
   });
 }
 
@@ -1048,16 +1073,17 @@ function renderEditor(key){
   const pv=el('canvas','pv'); pv.id='pv-'+key; pv.setAttribute('aria-label','Light output preview'); box.append(pv);
   for(const it of impl.schema){
     if(it.g){ box.append(el('div','gh',it.g)); continue; }
+    if(it.when&&!it.when(prof)) continue;
     if(it.choice){
       const row=el('div','rr'); row.append(el('label',null,it.l));
       const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',it.l);
       for(const [v,t] of it.choice){
         const b=el('button',null,t); b.type='button'; b.setAttribute('aria-pressed',prof[it.k]===v);
-        b.addEventListener('click',()=>{ prof[it.k]=v; seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b)); touch(); });
+        b.addEventListener('click',()=>{ prof[it.k]=v; seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b)); touch(); if(it.redo) renderEditor(key); });
         seg.append(b);
       }
       row.append(seg); box.append(row);
-    }else box.append(rangeRow(it.l,it.min,it.max,it.step,it.u,()=>prof[it.k],v=>{ prof[it.k]=v; touch(); }));
+    }else box.append(rangeRow(it.l,it.min,it.max,it.step,it.u,()=>prof[it.k],v=>{ prof[it.k]=v; touch(); },it.off));
   }
   box.append(el('div','gh','Colors'));
   const stops=el('div','stops'); box.append(stops); renderStops(key,stops);
@@ -1244,7 +1270,7 @@ try{ if(matchMedia('(pointer:coarse)').matches) document.addEventListener('conte
 
 /* ============ boot ============ */
 function rebuildAll(){
-  PLAN=buildWindows(cfg); SET_COLORS=setColors(cfg.sets); CFG_VER++;
+  PLAN=buildWindows(cfg); SET_COLORS=setColors(trackN(cfg)); CFG_VER++;
   buildTiming(); syncTiming(); buildNames(); renderSetNames(); renderEditor('load'); renderEditor('trans'); renderEditor('lead');
   buildLedBox(); buildPins(); renderLegend(); updateTotals(); updateSummaries(); applyBlind(); updateButtons();
 }

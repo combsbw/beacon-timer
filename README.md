@@ -87,6 +87,18 @@ whole session is 15 s + 4 x 5 x (30 + 2 + 15) s - 15 s = 15:40.
   Share > Add to Home Screen. The icon (`icons/`, source `icon.svg`) is served by the board and opens full screen.
   Rebuild `icons.h` with `make icons.h` after changing the PNGs.
 
+## Second LED and long loads
+
+- **Set LED shows** (Settings > Timing): *Sets* steps the second LED through one color per set (default); *Repeats* gives
+  it one color per repeat, so it stays one color for a whole pass and changes when the next repeat begins (the closing
+  transition already shows the next repeat's color). The caption under the LED reads SET or REPEAT.
+- **Loads up to 20 minutes.** The Load length steps in 5 s (under 2 min), 15 s (2-5 min) and 30 s (over 5 min); type a
+  value for anything exact. Times of an hour or more read h:mm:ss. Under Settings > Load:
+  - *Rate per Window / Minute*: Window keeps the old behaviour (pulses per window); Minute sets the rate in pulses per
+    minute (start and end), so a 20-minute load is not stuck with one pulse every couple of minutes.
+  - *Steady*: keep the starting rate for the first part of the window (in %), then ramp up for the rest.
+  - *Time marks*: a quick double flash every N seconds (10-600), so you can tell how far along a long load is. Off by default.
+
 ## Notes
 
 - Flashing faster than about 3 Hz can affect people with photosensitive epilepsy; "Max Hz" in Settings > LEDs caps the rate (default 7).

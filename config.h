@@ -45,6 +45,11 @@ inline void cfgProfileNum(Profile& p, const char* k, float v) {
   else if (!strcmp(k, "floor")) p.glow = v;
   else if (!strcmp(k, "blend")) p.blend = v;
   else if (!strcmp(k, "solid")) p.solid = v;
+  else if (!strcmp(k, "paced")) p.paced = v != 0.f;
+  else if (!strcmp(k, "pace0")) p.pace0 = v;
+  else if (!strcmp(k, "pace1")) p.pace1 = v;
+  else if (!strcmp(k, "rampAt")) p.rampAt = v;
+  else if (!strcmp(k, "markEvery")) p.markEvery = v;
   else if (!strcmp(k, "fade")) p.fade = v;
   else if (!strcmp(k, "breath")) p.breath = v;
   else if (!strcmp(k, "tail")) p.tail = v;
@@ -75,6 +80,7 @@ inline void cfgLeaf(void* vctx, const char* p, char t, double v, const char* s) 
     else if (!strcmp(p, "transSec")) c.transSec = f;
     else if (!strcmp(p, "sets")) c.sets = (int)floor(v + 0.5);
     else if (!strcmp(p, "repeat")) c.repeat = (int)floor(v + 0.5);
+    else if (!strcmp(p, "trackRepeats")) c.trackRepeats = v != 0;
     else if (!strcmp(p, "redHold")) c.redHold = f;
     else if (!strcmp(p, "skipFinal")) c.skipFinal = v != 0;
     else if (!strcmp(p, "lead")) c.lead = v != 0;
@@ -85,9 +91,9 @@ inline void cfgLeaf(void* vctx, const char* p, char t, double v, const char* s) 
     else if (!strcmp(p, "master")) c.master = f;
     else if (cfgPre(p, "pins.timer.", &r)) cfgPin(c.pins[0], r, t, v);
     else if (cfgPre(p, "pins.set.", &r)) cfgPin(c.pins[1], r, t, v);
-    else if (t == 'n' && cfgPre(p, "profiles.load.", &r)) cfgProfileNum(c.load, r, f);
-    else if (t == 'n' && cfgPre(p, "profiles.trans.", &r)) cfgProfileNum(c.trans, r, f);
-    else if (t == 'n' && cfgPre(p, "profiles.lead.", &r)) cfgProfileNum(c.leadP, r, f);
+    else if (cfgPre(p, "profiles.load.", &r)) cfgProfileNum(c.load, r, f);
+    else if (cfgPre(p, "profiles.trans.", &r)) cfgProfileNum(c.trans, r, f);
+    else if (cfgPre(p, "profiles.lead.", &r)) cfgProfileNum(c.leadP, r, f);
   } else if (t == 's') {
     Profile* pr = nullptr;
     int k = 0;
@@ -111,6 +117,8 @@ inline void cfgSanitizeProfile(Profile& p) {
   if (p.curve > 3) p.curve = 3;
   p.duty0 = clampf(p.duty0, 5.f, 95.f); p.duty1 = clampf(p.duty1, 5.f, 95.f);
   p.soft0 = clampf(p.soft0, 0.f, 100.f); p.soft1 = clampf(p.soft1, 0.f, 100.f);
+  p.pace0 = clampf(p.pace0, 1.f, 300.f); p.pace1 = clampf(p.pace1, 1.f, 300.f); p.rampAt = clampf(p.rampAt, 0.f, 90.f);
+  p.markEvery = p.markEvery <= 0.f ? 0.f : clampf(p.markEvery, 10.f, 600.f);
   p.solid = clampf(p.solid, 0.f, 10.f); p.fade = clampf(p.fade, 0.f, 5.f);
   p.glow = clampf(p.glow, 0.f, 100.f); p.blend = clampf(p.blend, 0.f, 100.f);
   p.breath = clampf(p.breath, 0.5f, 20.f); p.tail = clampf(p.tail, 0.5f, 60.f);
@@ -134,7 +142,7 @@ inline bool cfgFromJson(const char* json, size_t n, Config& out, bool* pinsOk = 
     if (x.colorN[k] >= 2) ps[k]->nColors = x.colorN[k];
     cfgSanitizeProfile(*ps[k]);
   }
-  out.loadSec = clampf(out.loadSec, 3.f, 600.f);
+  out.loadSec = clampf(out.loadSec, 3.f, 1200.f);
   out.transSec = clampf(out.transSec, 0.f, 600.f);
   if (out.sets < 1) out.sets = 1;
   if (out.sets > MAX_SETS) out.sets = MAX_SETS;
