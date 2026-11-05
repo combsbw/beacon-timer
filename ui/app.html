@@ -57,6 +57,8 @@ button{cursor:pointer}
 .top{display:flex;justify-content:space-between;align-items:center;padding-top:6px;flex:none}
 .brand{font:600 24px/1 var(--font-disp);letter-spacing:.03em}
 .link{display:flex;align-items:center;gap:8px;font:500 12px var(--font-mono);color:var(--muted)}
+.link.wake{cursor:pointer}
+.link.wake #linkTxt{color:var(--ink)}
 .link .ic{width:18px;height:18px}
 .dotc{width:8px;height:8px;border-radius:50%;background:var(--ok)}
 .dotc.busy{background:var(--busy)}
@@ -400,6 +402,19 @@ canvas{display:block;width:100%}
             <div class="fwrow">
               <button class="fbtn primary" id="fwGo" type="button" disabled><svg class="ic"><use href="#i-upload"/></svg><span id="fwGoTxt">Upload</span></button>
               <button class="fbtn badge" id="rebootBtn" type="button"><svg class="ic"><use href="#i-power"/></svg>Reboot</button>
+            </div>
+          </div>
+          <div class="pcard" id="netCard">
+            <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Network</span><span class="mono" id="netStat" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
+            <div class="srow">
+              <span class="sl"><span>Home Wi-Fi</span></span>
+              <label class="sw"><input type="checkbox" id="netSta" role="switch" aria-label="Join home Wi-Fi"><i></i></label>
+            </div>
+            <p class="note" id="netNote" aria-live="polite"></p>
+            <div class="fwrow">
+              <button class="fbtn" id="sleepBtn" type="button" hidden><svg class="ic"><use href="#i-moon"/></svg><span>Sleep</span></button>
+              <button class="fbtn primary" id="wakeBtn" type="button" hidden><svg class="ic"><use href="#i-sun"/></svg><span>Wake</span></button>
+              <button class="fbtn primary" id="netGo" type="button" hidden><svg class="ic"><use href="#i-power"/></svg><span id="netGoTxt">Reboot</span></button>
             </div>
           </div>
           <div class="pcard" id="upCard">
@@ -1028,7 +1043,7 @@ function updateSummaries(){
   setText($('#stLoad'),cfg.names.load||'Load'); setText($('#stTrans'),cfg.names.trans||'Transition'); setText($('#stLead'),cfg.names.lead||'Lead-in');
   for(const k of ['load','trans','lead']) $('#gr-'+k).style.background=`linear-gradient(90deg,${cfg.profiles[k].colors.join(',')})`;
   $('#sum-led').textContent=`${cfg.master}%`;
-  $('#sum-dev').textContent=pinConflicts()?'⚠':'';
+  $('#sum-dev').textContent=devSummary();
 }
 let presetPT=0;
 function touch(){ CFG_VER++; scheduleSave(); schedulePreviews(); updateSummaries(); clearTimeout(presetPT); presetPT=setTimeout(()=>{ if(!P.editing) renderPresets(); },250); }   /* keeps the "changed" tag on the active saved timer current */
@@ -1189,7 +1204,7 @@ function pinConflicts(){
 function refreshPins(){
   const bad=pinConflicts();
   document.querySelectorAll('#pinsBox .pin').forEach(p=>p.classList.toggle('bad',!!bad&&bad.has(p.dataset.id)));
-  $('#pinWarn').hidden=!bad; $('#sum-dev').textContent=bad?'⚠':'';
+  $('#pinWarn').hidden=!bad; $('#sum-dev').textContent=devSummary();
 }
 function buildPins(){
   const box=$('#pinsBox'); box.textContent='';
@@ -1215,18 +1230,42 @@ function buildPins(){
 }
 
 /* ============ device link ============ */
-/* On the device's own page (http, soft AP) this talks to the sketch: it polls the timer state, pushes settings and
-   sends commands. Anywhere else (this preview, a file) nothing answers, so it stays a self-contained mockup. */
-const DEV={on:false,rev:-1,seq:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0};
+/* On the device's own page (http, soft AP or home Wi-Fi) this talks to the sketch: it polls the timer state, pushes
+   settings and sends commands. Anywhere else nothing answers, so the timer on this page stands alone. */
+const DEV={on:false,rev:-1,seq:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function api(path,opt){
-  const c=new AbortController(), t=setTimeout(()=>c.abort(),3000);
-  return fetch(path,Object.assign({signal:c.signal,cache:'no-store'},opt||{}))
+  opt=Object.assign({},opt||{});
+  const ms=opt.timeout||(DEV.asleep?8000:3000); delete opt.timeout;
+  const c=new AbortController(), t=setTimeout(()=>c.abort(),ms);
+  return fetch(path,Object.assign({signal:c.signal,cache:'no-store'},opt))
     .then(r=>{ if(!r.ok) throw new Error(String(r.status)); return r.json(); }).finally(()=>clearTimeout(t));
 }
-function setLink(ok,text){ $('#linkDot').classList.toggle('busy',!ok); $('#linkTxt').textContent=text||'192.168.4.1'; }
+function linkLabel(){
+  if(!DEV.on) return '192.168.4.1';
+  if(DEV.asleep) return 'Asleep';
+  if(DEV.net==='sta') return location.host;
+  return DEV.fail?'AP fallback':'192.168.4.1';
+}
+function setLink(ok,text){
+  $('#linkDot').classList.toggle('busy',!ok);
+  const label=text||linkLabel();
+  $('#linkTxt').textContent=label;
+  const wake=!!(DEV.on&&DEV.asleep&&label==='Asleep');
+  const chip=$('#linkChip');
+  chip.classList.toggle('wake',wake);
+  if(wake){ chip.setAttribute('role','button'); chip.setAttribute('aria-label','Wake the timer'); }
+  else{ chip.removeAttribute('role'); chip.removeAttribute('aria-label'); }
+}
+function devNote(j){
+  if(!j) return;
+  DEV.asleep=!!j.sleep; if(j.net) DEV.net=j.net; DEV.fail=!!j.fail;
+}
 const STATES=['idle','run','pause','preview','done','stopped'];
 function devApplyState(j,rtt){
+  devNote(j);
+  if(DEV.on&&!DEV.rebooting) setLink(!DEV.asleep);
+  if(j) renderNet();
   if(!j||scrubbing||DEV.seekT) return;
   const st=STATES.includes(j.s)?j.s:'idle', tt=Number(j.t)+(st==='run'?(rtt||0)/2000:0);
   if(st!==S.state){ S.state=st; S.t=tt; if(st==='run') acquireWake(); else releaseWake(); updateButtons(); }
@@ -1262,7 +1301,7 @@ async function devPoll(){
       if(j.rev!==DEV.rev&&!DEV.pending){ DEV.rev=j.rev; applyRemoteConfig(await api('/api/config')); }
     }catch(e){ if(++DEV.fails===3) setLink(false,'Offline'); }
   }
-  setTimeout(devPoll,DEV.fails?1500:300);
+  setTimeout(devPoll,DEV.fails?1500:(DEV.asleep?4000:300));
 }
 async function devProbe(){
   if(location.protocol!=='http:') return;
@@ -1271,7 +1310,7 @@ async function devProbe(){
     if(!j||j.app!=='beacon') return;
     DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
     applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
-    setLink(true); presetsLoad(); upLoad(); devPoll();
+    setLink(true); presetsLoad(); upLoad(); netLoad(); devPoll();
   }catch(e){}
 }
 async function waitDevice(tries=45,label='Rebooting'){
@@ -1283,7 +1322,91 @@ async function waitDevice(tries=45,label='Rebooting'){
   DEV.rebooting=false; setLink(false,'Offline'); return false;
 }
 
-/* sketch upload and reboot: real over the soft AP, simulated in this preview */
+/* ============ home network / sleep ============ */
+/* The switch picks the mode. Reboot applies it. Credentials are the Online update fields (wSsid / wPass on the board). */
+const NET={info:null,hold:false,arm:0,key:''};
+const netSta=$('#netSta'), netNote=$('#netNote'), netStat=$('#netStat'), netGo=$('#netGo'), netGoTxt=$('#netGoTxt'), sleepBtn=$('#sleepBtn'), wakeBtn=$('#wakeBtn');
+function devSummary(){
+  if(pinConflicts()) return '⚠';
+  if(!DEV.on||!NET.info) return '';
+  if(NET.info.radio==='sta') return DEV.asleep?'asleep':'home Wi-Fi';
+  if(NET.info.fail) return 'AP fallback';
+  return '';
+}
+function netMsg(t,bad){ netNote.textContent=t||''; netNote.style.color=bad?'var(--bad)':''; }
+function netSsid(){ return (upSsid.value.trim()||(NET.info&&NET.info.ssid)||''); }
+function renderNet(){
+  const i=NET.info, on=DEV.on&&!!i;
+  const sta=on&&i.radio==='sta';
+  sleepBtn.hidden=!sta||DEV.asleep;
+  wakeBtn.hidden=!sta||!DEV.asleep;
+  netGo.hidden=!NET.hold;
+  netSta.disabled=!on;
+  netStat.textContent=on?(sta?(DEV.asleep?'asleep':i.ip):(i.fail?'fallback':i.ip)):'';
+  if(!NET.hold) netSta.checked=on&&i.wanted==='sta';
+  const key=!on?'off':[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0].join('|');
+  if(key===NET.key) { $('#sum-dev').textContent=devSummary(); return; }
+  NET.key=key;
+  if(!on) netMsg('Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
+  else if(NET.hold){ /* the switch handler wrote the reboot instructions */ }
+  else if(i.fail) netMsg('Could not join “'+(i.ssid||'the saved network')+'”. This boot is the Beacon-timer access point. Check the name and password below. The next boot tries again unless Home Wi-Fi is turned off.');
+  else if(sta&&DEV.asleep) netMsg('Asleep. Tap Wake, or Asleep at the top. Starting a session also wakes it. The LEDs sleep again after 5 minutes with nothing running, or when you tap Sleep.');
+  else if(sta) netMsg('On '+((i.ssid)||'home Wi-Fi')+' at '+i.ip+'. Open http://'+i.host+'.local from this network. The LEDs sleep after 5 minutes with no session running. Turn Home Wi-Fi off to reboot into the Beacon-timer access point.');
+  else netMsg('Access point, always awake. The name and password below are the home network. Turn Home Wi-Fi on, then reboot.');
+  $('#sum-dev').textContent=devSummary();
+}
+async function netLoad(){
+  if(!DEV.on){ NET.info=null; NET.key=''; renderNet(); return; }
+  try{ NET.info=await api('/api/net'); NET.key=''; }catch(e){}
+  renderNet();
+}
+netSta.addEventListener('change',()=>{
+  if(!NET.info){ netSta.checked=false; return; }
+  if(S.state==='run'||S.state==='pause'){ netSta.checked=NET.info.wanted==='sta'; netMsg('Stop the timer first.',true); return; }
+  const want=netSta.checked, saved=NET.info.wanted==='sta';
+  if(want===saved){ NET.hold=false; NET.key=''; renderNet(); return; }
+  if(want&&!netSsid()){ netSta.checked=false; NET.hold=false; netMsg('Enter a Wi-Fi name under Online update first. It has to be 2.4 GHz.',true); return; }
+  NET.hold=true; NET.key=''; netGo.hidden=false; netGoTxt.textContent='Reboot';
+  netMsg(want
+    ? 'Reboot to join “'+netSsid()+'”. This phone then has to use that network and open http://beacon-timer.local.'
+    : 'Reboot into the Beacon-timer access point. It stays awake and does not sleep.');
+});
+netGo.addEventListener('click',async()=>{
+  if(!NET.info||!NET.hold) return;
+  if(!NET.arm){ NET.arm=setTimeout(()=>{ NET.arm=0; netGoTxt.textContent='Reboot'; },3500); netGoTxt.textContent='Tap again'; return; }
+  clearTimeout(NET.arm); NET.arm=0; netGoTxt.textContent='Reboot';
+  if(S.state==='run'||S.state==='pause'){ netMsg('Stop the timer first.',true); return; }
+  const mode=netSta.checked?'sta':'ap';
+  const f=new URLSearchParams(); f.set('mode',mode);
+  if(mode==='sta'){ f.set('ssid',netSsid()); if(UP.dirty.pass) f.set('pass',upPass.value); }
+  netSta.disabled=true; netGo.disabled=true; sleepBtn.disabled=true;
+  try{
+    await api('/api/net',{method:'POST',body:f,timeout:8000});
+  }catch(e){
+    netSta.disabled=false; netGo.disabled=false; sleepBtn.disabled=false;
+    netMsg(/409/.test(String(e))?'Stop the timer first.':'Could not change the network.',true); return;
+  }
+  DEV.rebooting=true; S.state='idle'; S.t=0; releaseWake(); updateButtons(); setLink(false,'Rebooting');
+  netMsg(mode==='sta'
+    ? 'Joining “'+netSsid()+'”. On this phone, join that Wi-Fi, then open http://beacon-timer.local.'
+    : 'Starting Beacon-timer. Join that Wi-Fi, then open http://192.168.4.1.');
+});
+async function wakeNow(){
+  try{
+    const j=await api('/api/wake',{method:'POST',timeout:8000});
+    devApplyState(j,0);
+  }catch(e){ setLink(false,'No reply'); }
+}
+sleepBtn.addEventListener('click',async()=>{
+  if(S.state==='run'||S.state==='pause'){ netMsg('Stop the timer first.',true); return; }
+  try{ devApplyState(await api('/api/sleep',{method:'POST',timeout:8000}),0); }
+  catch(e){ netMsg(/409/.test(String(e))?'Stop the timer first.':'Could not reach the timer.',true); }
+});
+wakeBtn.addEventListener('click',wakeNow);
+$('#linkChip').addEventListener('click',()=>{ if(DEV.on&&DEV.asleep) wakeNow(); });
+renderNet();
+
+/* sketch upload and reboot: real on the device, simulated in this preview */
 const FW={file:null,busy:false};
 const fwFile=$('#fwFile'), fwGo=$('#fwGo'), fwBar=$('#fwBar'), fwFill=$('#fwFill'), fwName=$('#fwName'), fwGoTxt=$('#fwGoTxt'), rebootBtn=$('#rebootBtn');
 function markReboot(on){ rebootBtn.classList.toggle('on',on); }
@@ -1398,7 +1521,9 @@ upGo.addEventListener('click',async()=>{
   }
   const before=UP.info&&UP.info.ver;
   upGoTxt.textContent='Updating…';
-  upMsg('The timer has left its own Wi-Fi to download the update. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If your phone does not rejoin “Beacon-timer” by itself afterwards, rejoin it.');
+  upMsg(DEV.net==='sta'
+    ? 'The timer is downloading the update on this network. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If this page does not reconnect, open http://beacon-timer.local.'
+    : 'The timer has left its own Wi-Fi to download the update. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If your phone does not rejoin “Beacon-timer” by itself afterwards, rejoin it.');
   S.state='idle'; S.t=0; releaseWake(); updateButtons();
   const back=await waitDevice(130,'Updating');
   UP.busy=false; upGoTxt.textContent='Update now';

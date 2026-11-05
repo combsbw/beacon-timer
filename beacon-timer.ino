@@ -3,6 +3,9 @@
  *
  *   Board   : esp32:esp32:esp32s3  (arduino-esp32 core 2.0.17), USB CDC On Boot = enabled
  *   Wi-Fi   : open soft AP "Beacon-timer"  ->  http://192.168.4.1  (captive portal opens the page by itself)
+ *             or, after Device > Network, the home network saved for online update -> http://beacon-timer.local
+ *   Sleep   : home-network mode only. LEDs off and Wi-Fi modem sleep after 5 min idle, or when the page asks.
+ *             A wake request (or starting a session) brings the radio and LEDs back. The AP never sleeps.
  *   Update  : ArduinoOTA on port 3232 ("make ota") and an HTTP upload from the Settings > Device page
  *
  * The timer runs on the device, so it keeps going with no phone connected. The web page is the control panel:
@@ -30,6 +33,7 @@
 #include <time.h>
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 
 #include "engine.h"
 #include "json.h"
@@ -38,7 +42,9 @@
 #include "icons.h"
 #include "ghupdate.h"
 
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.4.0"
+#define IDLE_SLEEP_MS (5UL * 60UL * 1000UL)   // home-network mode: sleep this long after the session stops
+#define STA_JOIN_MS 15000
 #define AP_SSID "Beacon-timer"          // open network, no password
 #define AP_CHANNEL 6
 #define AP_MAX_CLIENTS 4
@@ -110,6 +116,13 @@ static bc::Engine eng;
 static SemaphoreHandle_t engMtx;
 static volatile bool otaBusy = false;
 static volatile uint32_t rebootAtMs = 0;
+static volatile bool powerSave = false;     // home-network modem sleep: LEDs off, radio wakes for a packet
+static volatile uint8_t joinPhase = 0;      // 1 while the boot join of the home network is in progress
+static bool radioSta = false;              // this boot is associated to the home network
+static bool staFailed = false;             // wanted the home network, join failed, so this boot is the access point
+static bool dnsOn = false;
+static uint32_t idleSinceMs = 0;
+static TaskHandle_t ledTaskHandle = nullptr;
 // Online update from GitHub: phase 1 joining Wi-Fi, 2 clock, 3 finding the release, 4 downloading, 5 done, 6 failed (0 = idle)
 static volatile uint8_t updPhase = 0, updPct = 0, updErr = 0;
 static volatile uint32_t updStartAt = 0;
@@ -162,15 +175,66 @@ static void updLeds(bc::Out& o) {
 }
 
 // ---- LED task: 250 Hz, on its own so the LEDs stay smooth while the web server is busy -------------------------------
+static void leaveSleep() {
+  if (!powerSave) return;
+  powerSave = false;
+  esp_wifi_set_ps(WIFI_PS_NONE);            // polls and the LED frame rate stay responsive while someone is using it
+  idleSinceMs = millis();
+  if (ledTaskHandle) xTaskNotifyGive(ledTaskHandle);
+}
+
+static void enterSleep() {
+  if (!radioSta || powerSave || otaBusy || updPhase) return;
+  powerSave = true;
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);       // radio stays associated and wakes when a packet arrives
+}
+
+static void noteActivity() {
+  idleSinceMs = millis();
+  if (powerSave) leaveSleep();
+}
+
+// Asleep only while the home network is up and no session is running or paused.
+static void refreshIdle() {
+  if (!radioSta) return;
+  if (otaBusy || updPhase || rebootAtMs || updStartAt) {
+    if (powerSave) leaveSleep();
+    return;
+  }
+  bool busy;
+  LOCK();
+  busy = eng.state == bc::ST_RUN || eng.state == bc::ST_PAUSE;
+  UNLOCK();
+  if (busy) {
+    if (powerSave) leaveSleep();
+    idleSinceMs = millis();
+    return;
+  }
+  if (!powerSave && (uint32_t)(millis() - idleSinceMs) >= IDLE_SLEEP_MS) enterSleep();
+}
+
 static void ledTask(void*) {
   TickType_t last = xTaskGetTickCount();
   const TickType_t period = pdMS_TO_TICKS(4) > 0 ? pdMS_TO_TICKS(4) : 1;
+  const bc::Rgb dark = {0.f, 0.f, 0.f};
   for (;;) {
+    if (powerSave) {
+      LOCK();
+      hwWrite(0, dark, 0.f, 0.f);
+      hwWrite(1, dark, 0.f, 0.f);
+      UNLOCK();
+      while (powerSave) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // a pending notify from a previous wake is consumed and we wait again
+      last = xTaskGetTickCount();
+      continue;
+    }
     bc::Out o;
     LOCK();
     eng.render(esp_timer_get_time(), o);
     float master = eng.cfg.master / 100.f;
-    if (updPhase) {
+    if (joinPhase == 1) {
+      float br = 0.3f + 0.25f * sinf((float)(esp_timer_get_time() % 1500000) / 1500000.f * bc::TAU_F);
+      o.c1 = bc::Rgb{255.f, 170.f, 0.f}; o.b1 = br; o.b2 = 0.f;
+    } else if (updPhase) {
       updLeds(o);
     } else if (otaBusy) {                           // firmware update running: timer LED breathes cyan, set LED off
       float br = 0.3f + 0.25f * sinf((float)(esp_timer_get_time() % 1500000) / 1500000.f * bc::TAU_F);
@@ -216,17 +280,35 @@ static void sendJson(int code, const char* body) {
 
 static void sendState() {
   int64_t now = esp_timer_get_time();
-  char buf[200];
+  char buf[240];
   LOCK();
   double t = eng.position(now);
   if (t > eng.plan.total) t = eng.plan.total;
-  snprintf(buf, sizeof buf, "{\"app\":\"beacon\",\"ver\":\"%s\",\"s\":\"%s\",\"t\":%.3f,\"total\":%.1f,\"rev\":%lu,\"ota\":%d,\"up\":%lu}",
-           FW_VERSION, bc::stateName(eng.state), t, (double)eng.plan.total, (unsigned long)cfgRev, otaBusy ? 1 : 0, (unsigned long)(millis() / 1000));
+  snprintf(buf, sizeof buf,
+           "{\"app\":\"beacon\",\"ver\":\"%s\",\"s\":\"%s\",\"t\":%.3f,\"total\":%.1f,\"rev\":%lu,\"ota\":%d,\"up\":%lu,\"sleep\":%d,\"net\":\"%s\",\"fail\":%d}",
+           FW_VERSION, bc::stateName(eng.state), t, (double)eng.plan.total, (unsigned long)cfgRev, otaBusy ? 1 : 0,
+           (unsigned long)(millis() / 1000), powerSave ? 1 : 0, radioSta ? "sta" : "ap", staFailed ? 1 : 0);
   UNLOCK();
   sendJson(200, buf);
 }
 
+static void handleWake() {
+  noteActivity();
+  sendState();
+}
+
+static void handleSleep() {
+  if (!radioSta) { sendJson(409, "{\"ok\":false,\"err\":\"ap\"}"); return; }
+  LOCK();
+  bool running = eng.state == bc::ST_RUN || eng.state == bc::ST_PAUSE;
+  UNLOCK();
+  if (running || otaBusy || updPhase) { sendJson(409, "{\"ok\":false,\"err\":\"busy\"}"); return; }
+  enterSleep();
+  sendState();
+}
+
 static void handleCmd() {
+  noteActivity();
   String c = server.arg("c");
   bool haveT = server.hasArg("t");
   double t = haveT ? server.arg("t").toDouble() : 0.0;
@@ -261,6 +343,7 @@ static void handleConfigPost() {
     cfgDirty = true;                  // written to flash after a quiet moment, not on every slider tick
     cfgDirtyAt = millis();
   }
+  noteActivity();
   cfgRev++;
   char buf[64];
   snprintf(buf, sizeof buf, "{\"ok\":true,\"rev\":%lu,\"pins\":%s}", (unsigned long)cfgRev, pinsOk ? "true" : "false");
@@ -311,6 +394,7 @@ static void handlePresetsPost() {
   if (w != n) { LittleFS.remove("/presets.tmp"); sendJson(500, "{\"ok\":false}"); return; }
   LittleFS.remove("/presets.json");
   LittleFS.rename("/presets.tmp", "/presets.json");
+  noteActivity();
   sendJson(200, "{\"ok\":true}");
 }
 
@@ -412,11 +496,12 @@ static void runWebUpdate() {
   prefs.putString("wFrom", FW_VERSION);
   prefs.putString("wRes", "");
   otaBusy = true; updErr = 0; updPct = 0; updPhase = 1;
-  Serial.println("online update: leaving the soft AP");
+  if (powerSave) leaveSleep();          // the LED task is parked while asleep, and the update pattern has to be visible
+  Serial.println("online update: joining Wi-Fi");
 
   server.stop();
 #if CAPTIVE_PORTAL
-  dns.stop();
+  if (dnsOn) { dns.stop(); dnsOn = false; }
 #endif
   ArduinoOTA.end();
   WiFi.softAPdisconnect(true);
@@ -538,10 +623,86 @@ static void handleUpdateData() {
   }
 }
 
+static void handleNetInfo() {
+  String ssid = prefs.getString("wSsid", "");
+  String wanted = prefs.getString("wMode", "ap");
+  if (wanted != "sta") wanted = "ap";
+  bool hasPass = prefs.getString("wPass", "").length() > 0;
+  String ip = radioSta ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  String r = String("{\"wanted\":\"") + wanted + "\",\"radio\":\"" + (radioSta ? "sta" : "ap") +
+             "\",\"fail\":" + (staFailed ? "true" : "false") + ",\"ssid\":\"" + jsonEsc(ssid) +
+             "\",\"hasPass\":" + (hasPass ? "true" : "false") + ",\"ip\":\"" + ip +
+             "\",\"host\":\"" HOST_NAME "\",\"sleep\":" + (powerSave ? "true" : "false") + "}";
+  sendJson(200, r.c_str());
+}
+
+// mode=sta saves the shared Wi-Fi name and password (the same ones online update uses) and reboots into station mode.
+// mode=ap reboots into the always-on access point. A field that is not sent is left as it was.
+static void handleNetPost() {
+  if (!server.hasArg("mode")) { sendJson(400, "{\"ok\":false,\"err\":\"mode\"}"); return; }
+  String mode = server.arg("mode");
+  if (mode != "sta" && mode != "ap") { sendJson(400, "{\"ok\":false,\"err\":\"mode\"}"); return; }
+  LOCK();
+  bool running = eng.state == bc::ST_RUN || eng.state == bc::ST_PAUSE;
+  UNLOCK();
+  if (running || otaBusy || updPhase) { sendJson(409, "{\"ok\":false,\"err\":\"busy\"}"); return; }
+  if (server.hasArg("ssid")) {
+    String v = server.arg("ssid");
+    if (v.length() > 32) { sendJson(400, "{\"ok\":false,\"err\":\"ssid\"}"); return; }
+    prefs.putString("wSsid", v);
+  }
+  if (server.hasArg("pass")) {
+    String v = server.arg("pass");
+    if (v.length() > 63) { sendJson(400, "{\"ok\":false,\"err\":\"pass\"}"); return; }
+    prefs.putString("wPass", v);
+  }
+  if (mode == "sta" && prefs.getString("wSsid", "").length() == 0) { sendJson(400, "{\"ok\":false,\"err\":\"ssid\"}"); return; }
+  prefs.putString("wMode", mode);
+  sendJson(200, "{\"ok\":true}");
+  rebootAtMs = millis() + 600;
+  if (!rebootAtMs) rebootAtMs = 1;
+}
+
 static void handleNotFound() {
+  if (radioSta) { server.send(404, "text/plain", "not found"); return; }
   // Captive portal: any other address (connectivity checks, typed names) goes to the page.
   server.sendHeader("Location", "http://192.168.4.1/");
   server.send(302, "text/plain", "");
+}
+
+static bool startStation() {
+  String ssid = prefs.getString("wSsid", "");
+  String pass = prefs.getString("wPass", "");
+  if (!ssid.length()) return false;
+  joinPhase = 1;
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(HOST_NAME);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - t0) < STA_JOIN_MS) delay(100);
+  joinPhase = 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("home Wi-Fi join failed for \"%s\"\n", ssid.c_str());
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+    return false;
+  }
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  Serial.printf("home Wi-Fi \"%s\"  http://%s  http://%s.local\n", ssid.c_str(), WiFi.localIP().toString().c_str(), HOST_NAME);
+  return true;
+}
+
+static void startAp() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  WiFi.softAPsetHostname(HOST_NAME);
+  WiFi.softAP(AP_SSID, nullptr, AP_CHANNEL, 0, AP_MAX_CLIENTS);       // no password
+  esp_wifi_set_ps(WIFI_PS_NONE);
+#if CAPTIVE_PORTAL
+  dns.start(53, "*", IPAddress(192, 168, 4, 1));
+  dnsOn = true;
+#endif
 }
 
 // ---- setup / loop -------------------------------------------------------------------------------------------------
@@ -553,16 +714,17 @@ void setup() {
   hw[0].live = hw[1].live = false;
   fsOk = LittleFS.begin(true);          // formats the storage on the very first boot
   cfgLoad();                            // also sets up the LED pins: common pin held HIGH (anode) so the LEDs start dark
-  xTaskCreatePinnedToCore(ledTask, "led", 6144, nullptr, 5, nullptr, 1);
+  xTaskCreatePinnedToCore(ledTask, "led", 6144, nullptr, 5, &ledTaskHandle, 1);
 
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, nullptr, AP_CHANNEL, 0, AP_MAX_CLIENTS);       // no password
-  WiFi.setSleep(false);
-#if CAPTIVE_PORTAL
-  dns.start(53, "*", IPAddress(192, 168, 4, 1));
-#endif
+  String wanted = prefs.getString("wMode", "ap");
+  if (wanted == "sta") {
+    radioSta = startStation();
+    staFailed = !radioSta;
+  }
+  if (!radioSta) startAp();
+  else if (MDNS.begin(HOST_NAME)) MDNS.addService("http", "tcp", 80);
+  idleSinceMs = millis();
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/apple-touch-icon.png", HTTP_GET, handleIcon180);
@@ -571,6 +733,10 @@ void setup() {
   server.on("/favicon.ico", HTTP_GET, handleIcon192);
   server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
   server.on("/api/state", HTTP_GET, sendState);
+  server.on("/api/net", HTTP_GET, handleNetInfo);
+  server.on("/api/net", HTTP_POST, handleNetPost);
+  server.on("/api/wake", HTTP_POST, handleWake);
+  server.on("/api/sleep", HTTP_POST, handleSleep);
   server.on("/api/update", HTTP_GET, handleUpdInfo);
   server.on("/api/update/save", HTTP_POST, handleUpdSave);
   server.on("/api/update/start", HTTP_POST, handleUpdStart);
@@ -586,21 +752,23 @@ void setup() {
 
   ArduinoOTA.setHostname(HOST_NAME);
   ArduinoOTA.setPort(OTA_PORT);
-  ArduinoOTA.onStart([]() { otaBusy = true; Serial.println("OTA start"); });
+  ArduinoOTA.onStart([]() { otaBusy = true; if (powerSave) leaveSleep(); Serial.println("OTA start"); });
   ArduinoOTA.onEnd([]() { Serial.println("OTA end"); });
   ArduinoOTA.onError([](ota_error_t e) { otaBusy = false; Serial.printf("OTA error %u\n", (unsigned)e); });
   ArduinoOTA.begin();
 
   Serial.printf("Beacon Timer %s\n", FW_VERSION);
-  Serial.printf("AP \"%s\" (open)  http://%s  OTA port %d\n", AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_PORT);
+  if (radioSta) Serial.printf("STA http://%s  http://%s.local  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, OTA_PORT);
+  else Serial.printf("AP \"%s\" (open)  http://%s  OTA port %d%s\n", AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_PORT, staFailed ? "  (home Wi-Fi join failed)" : "");
 }
 
 void loop() {
 #if CAPTIVE_PORTAL
-  dns.processNextRequest();
+  if (dnsOn) dns.processNextRequest();
 #endif
   server.handleClient();
   ArduinoOTA.handle();
+  refreshIdle();
 
   if (updStartAt && (int32_t)(millis() - updStartAt) >= 0) { updStartAt = 0; runWebUpdate(); }   // does not return: it restarts
   if (cfgDirty && millis() - cfgDirtyAt > 2000) cfgSaveNow();
@@ -609,5 +777,5 @@ void loop() {
     delay(100);
     ESP.restart();
   }
-  delay(2);
+  delay(powerSave ? 20 : 2);
 }

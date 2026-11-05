@@ -26,7 +26,8 @@ BIN        := $(BUILD)/$(SKETCH).ino.bin
 # If the board does not show up, hold BOOT while plugging it in, then run make ports again.
 PORT       ?= $(shell $(CLI) board list 2>/dev/null | awk 'tolower($$0) ~ /esp32s3|esp32-s3|s3 dev/ {print $$1; exit}')
 
-# Wi-Fi update: the soft AP is always 192.168.4.1. ArduinoOTA listens on 3232 (no password).
+# Wi-Fi update: the soft AP is 192.168.4.1. On home Wi-Fi, pass the timer's address (OTA_HOST=beacon-timer.local).
+# ArduinoOTA listens on 3232 (no password).
 OTA_HOST   ?= 192.168.4.1
 OTA_PORT   ?= 3232
 DATA_DIR   := $(shell $(CLI) config get directories.data 2>/dev/null)
@@ -34,15 +35,15 @@ ARDUINO15  := $(if $(DATA_DIR),$(DATA_DIR),$(HOME)/.arduino15)
 ESPOTA     ?= $(firstword $(wildcard $(ARDUINO15)/packages/esp32/hardware/esp32/$(CORE_VER)/tools/espota.py))
 
 .DEFAULT_GOAL := help
-.PHONY: help ports deps ui build flash ota ota-http monitor test clean
+.PHONY: help ports deps ui pages build flash ota ota-http monitor test clean
 
 help:
 	@echo "make ports   list serial ports"
 	@echo "make deps    install esp32 core $(CORE_VER)"
 	@echo "make build   compile ($(FQBN))"
 	@echo "make flash   build and upload over USB (PORT=$(PORT))"
-	@echo "make ota     upload over Wi-Fi to $(OTA_HOST):$(OTA_PORT)  (join the Beacon-timer network first)"
-	@echo "also: test, ui, monitor, ota-http, clean"
+	@echo "make ota     upload over Wi-Fi to $(OTA_HOST):$(OTA_PORT)  (Beacon-timer, or the home network if the timer joined it)"
+	@echo "also: test, ui, pages, monitor, ota-http, clean"
 
 ports:
 	$(CLI) board list
@@ -60,7 +61,13 @@ webui.h: ui/app.html tools/embed_ui.py
 icons.h: icons/apple-touch-icon.png icons/icon-192.png tools/embed_icons.py
 	python3 tools/embed_icons.py
 
-ui: webui.h
+# GitHub Pages site (docs/ on main). Relative paths, so it works at /<repo>/.
+docs/index.html: ui/app.html icons/apple-touch-icon.png icons/icon-192.png tools/build_pages.py
+	python3 tools/build_pages.py
+
+pages: docs/index.html
+
+ui: webui.h pages
 
 build: webui.h icons.h
 	$(CLI) compile --fqbn $(FQBN) --output-dir $(BUILD) .

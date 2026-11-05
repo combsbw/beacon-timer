@@ -1,8 +1,10 @@
 # Beacon Timer
 
-Interval timer with two RGB LEDs (Timer and Set) for the **ESP32-S3 Super Mini**. The timer runs on the board; a phone
-joins the open Wi-Fi network **Beacon-timer**, opens `http://192.168.4.1` (a captive portal does it automatically) and
-gets the control panel: Start / Pause / Stop / Reset, every setting, and firmware update.
+Interval timer with two RGB LEDs (Timer and Set) for the **ESP32-S3 Super Mini**. The timer runs on the board. A phone
+joins the open Wi-Fi network **Beacon-timer** and opens `http://192.168.4.1` (a captive portal does it automatically),
+or, after Settings > Device > Network is set to home Wi-Fi, opens `http://beacon-timer.local` on that network. The page
+is the control panel: Start / Pause / Stop / Reset, every setting, and firmware update. The same page is also a timer
+on its own, with no board connected.
 
 ## Build in the cloud (no local install)
 
@@ -71,6 +73,9 @@ to flash two seconds after the last change.
 | `GET/POST /api/config`    | The settings JSON (POST body is plain text); `rev` changes when it does |
 | `GET/POST /api/presets`   | The saved-timer list (one JSON array, up to 32 kB), kept in LittleFS      |
 | `POST /api/reboot`        | Restart                                                                 |
+| `GET/POST /api/net`       | Home Wi-Fi vs access point. GET does not return the password. POST `mode=sta` or `mode=ap` (optional `ssid`, `pass`) and the board reboots |
+| `POST /api/wake`          | Leave modem sleep (home Wi-Fi only)                                     |
+| `POST /api/sleep`         | Modem sleep now, if no session is running or paused                     |
 | `POST /update`            | Multipart firmware upload (field `firmware`), reboots when done         |
 
 ## Session layout
@@ -80,13 +85,27 @@ Load, then the red Hold. A Transition separates sets and also leads from the las
 of the next. "Final transition" only decides whether the very last set ends with a transition. With the defaults the
 whole session is 15 s + 4 x 5 x (30 + 2 + 15) s - 15 s = 15:40.
 
-## Load start and home-screen app
+## The page on a phone
 
-- The first 3 s of every Load window are a solid light in the first color (green), then it fades out over 1 s into the
-  pulse train; the pulses keep running on the window clock. Both times are in Settings > Load ("Start of window"; 0 = off).
-- Home-screen app: join **Beacon-timer**, open `http://192.168.4.1` in **Safari** (not the captive-portal pop-up), tap
-  Share > Add to Home Screen. The icon (`icons/`, source `icon.svg`) is served by the board and opens full screen.
-  Rebuild `icons.h` with `make icons.h` after changing the PNGs.
+The timer in the page runs on the phone either way. The board is the LEDs, and the shared copy of settings and saved timers.
+
+- **Offline iPhone icon.** The site in `docs/` is the timer with a service worker. With the repository public, set GitHub Pages to deploy from the `main` branch, folder `/docs`. The address is `https://combsbw.github.io/beacon-timer/`. In Safari, open that address, tap Share > Add to Home Screen, then open the new icon once while the site is still up. After that the timer works with no computer, no board, and no network. The phone keeps its copy if the repository is made private again. To publish a new timer page, run `make pages`, push, make the repository public long enough to open the icon once, then it can be private again.
+- **On the board.** Join **Beacon-timer** and open `http://192.168.4.1`, or in home Wi-Fi mode open `http://beacon-timer.local`. That copy can wake the board and edit the shared settings. An icon saved from the board only loads while the phone is on the board's network. Rebuild `icons.h` with `make icons.h` after changing the PNGs.
+
+## Home Wi-Fi, sleep, and the access point
+
+Settings > Device > **Network**. The Wi-Fi name and password are the ones under **Online update** (2.4 GHz only). Turn on **Home Wi-Fi** and tap **Reboot** twice. The board joins that network, serves this same page at `http://beacon-timer.local`, and shows its address in Device.
+
+On that network the board stays fully awake while a session is running or paused. Five minutes after the session stops, or when **Sleep** is tapped, the LEDs go off and the Wi-Fi radio sleeps between beacons. It is still associated, so **Wake** (or **Asleep** in the header, or starting a session) reaches it and brings the LEDs back. The phone has to be on that same network.
+
+Turn **Home Wi-Fi** off and reboot to return to the **Beacon-timer** access point. That mode does not sleep.
+
+If the network is missing or the password is wrong, that boot brings **Beacon-timer** up instead and Device says so. The saved choice is kept, so the next boot tries the home network again. Turn Home Wi-Fi off to stop trying.
+
+## Load start
+
+The first 3 s of every Load window are a solid light in the first color (green), then it fades out over 1 s into the
+pulse train; the pulses keep running on the window clock. Both times are in Settings > Load ("Start of window"; 0 = off).
 
 ## Second LED and long loads
 
@@ -118,15 +137,15 @@ Settings > Device > **Online update**: enter the Wi-Fi network the board should 
 3. finds the release (Set LED flashes three times),
 4. downloads `beacon-timer.ota.bin` from the repo's **Latest build** release over verified HTTPS (Timer LED breathes cyan,
    Set LED is a bar from red through yellow to green with a quick dip each second),
-5. installs it, flashes green, and restarts, which brings the Beacon-timer Wi-Fi back.
+5. installs it, flashes green, and restarts into whichever mode was saved (home Wi-Fi, or the Beacon-timer access point).
 
 If it fails, the Timer LED blinks red and the Set LED flashes the error number (1 Wi-Fi, 2 clock, 3 GitHub, 4 download,
-5 flash write), then the board restarts on the old firmware. The page shows the result when you rejoin Beacon-timer. The
-update is refused while a timer is running. The repository defaults to `combsbw/beacon-timer`; for a private repository
+5 flash write), then the board restarts on the old firmware, again in the saved mode. The page shows the result when you
+reconnect. The update is refused while a timer is running. The repository defaults to `combsbw/beacon-timer`; for a private repository
 put a read-only token under *GitHub source* (the token is sent only to api.github.com).
 
-The Wi-Fi password and token are stored in the board's flash as plain text and are never sent back to the page. The Beacon-timer
-Wi-Fi is open, so anyone in range could change them or start an update, as they could already upload firmware.
+The Wi-Fi name and password are also what **Home Wi-Fi** mode joins. The password and token are stored in the board's flash as plain text and are never sent back to the page. The Beacon-timer
+Wi-Fi is open, so anyone in range could change them or start an update, as they could already upload firmware. On a home network the same page is reachable by anyone on that network.
 
 ## Notes
 

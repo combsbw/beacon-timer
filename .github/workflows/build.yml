@@ -30,6 +30,8 @@ jobs:
         run: |
           python3 tools/embed_ui.py
           python3 tools/embed_icons.py
+          python3 tools/build_pages.py
+          git diff --exit-code -- docs
 
       - name: Compile (esp32:esp32:esp32s3, USB CDC on boot)
         run: make build

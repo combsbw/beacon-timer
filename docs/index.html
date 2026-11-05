@@ -1,0 +1,1646 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b0e10"><title>Beacon Timer</title><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" type="image/png" href="icon-192.png"><link rel="manifest" href="manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Beacon"><meta name="apple-mobile-web-app-status-bar-style" content="black"><style>
+/* Layout: a phone-width app. Top bar and tabs, one scrolling screen (Timer or Settings), and a bottom dock with progress and Start / Stop / Reset. The timer screen is a dark instrument card; settings are grouped sections. */
+:root{
+  color-scheme:light;
+  --bg:#f3f5f6; --panel:#f3f5f6; --ink:#12171a; --muted:#5b6870; --line:#cfd6da; --field:#f3f5f6; --track:#dde3e6;
+  --btn:#12171a; --btn-ink:#f3f5f6; --focus:#1a6bff; --ok:#1fa463; --busy:#d9930d; --bad:#d62839;
+  --inst:var(--bg); --inst-2:var(--bg); --inst-line:var(--line); --inst-ink:var(--ink); --inst-mut:var(--muted);
+  --font-ui:'Barlow',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-disp:'Barlow Condensed','Arial Narrow',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b0e10; --panel:#0b0e10; --ink:#e8eef1; --muted:#8e9ba3; --line:#263038; --field:#0b0e10; --track:#1a2228;
+    --btn:#e7edf0; --btn-ink:#0c0f11; --focus:#6aa0ff; --ok:#35c07d; --busy:#f0a92a; --bad:#ff5b6b; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b0e10; --panel:#0b0e10; --ink:#e8eef1; --muted:#8e9ba3; --line:#263038; --field:#0b0e10; --track:#1a2228;
+  --btn:#e7edf0; --btn-ink:#0c0f11; --focus:#6aa0ff; --ok:#35c07d; --busy:#f0a92a; --bad:#ff5b6b; color-scheme:dark;
+}
+
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:manipulation}   /* manipulation: no double-tap zoom, scrolling and pinch still work */
+body{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}                      /* no long-press text highlight or callout menu */
+input,textarea,select{-webkit-user-select:text;user-select:text}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink); font-family:var(--font-ui); font-size:15px; line-height:1.4;
+  display:flex; justify-content:center; align-items:stretch;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ic.red{color:#ff1f2d}
+.mono{font-family:var(--font-mono)}
+
+.app{flex:1;max-width:480px;height:100%;display:flex;flex-direction:column;gap:10px;min-height:0}
+@media (min-width:600px){
+  body{padding-block:16px;align-items:center}
+  .app{max-height:920px;border:1px solid var(--line);border-radius:30px;padding:14px 16px 0;overflow:hidden}
+}
+
+.top{display:flex;justify-content:space-between;align-items:center;padding-top:6px;flex:none}
+.brand{font:600 24px/1 var(--font-disp);letter-spacing:.03em}
+.link{display:flex;align-items:center;gap:8px;font:500 12px var(--font-mono);color:var(--muted)}
+.link.wake{cursor:pointer}
+.link.wake #linkTxt{color:var(--ink)}
+.link .ic{width:18px;height:18px}
+.dotc{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.dotc.busy{background:var(--busy)}
+.tools{display:flex;align-items:center;gap:12px}
+
+.tabs{display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:3px;border-radius:14px;background:var(--track);flex:none}
+.tabs button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:42px;border:0;border-radius:11px;background:transparent;font-weight:600;color:var(--muted)}
+.tabs button[aria-selected="true"]{background:var(--panel);color:var(--ink)}
+
+.screens{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding-bottom:12px}
+.screens>section{flex:none;display:flex;flex-direction:column;gap:12px}
+
+/* timer screen */
+.inst{color:var(--ink);display:flex;flex-direction:column;gap:8px;min-width:0}
+.inst-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.phase{display:flex;align-items:center;gap:10px;font:600 26px/1 var(--font-disp);letter-spacing:.04em;min-width:0}
+.phase span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:14px;height:14px;border-radius:50%;background:#3a4650;flex:none}
+.head-r{display:flex;align-items:center;gap:6px;flex:none}
+.setline{font:500 14px/1.25 var(--font-mono);color:var(--inst-mut);margin-right:4px;text-align:right;white-space:pre-line;flex:none}
+.ib{width:36px;height:36px;border-radius:10px;border:1px solid var(--inst-line);background:transparent;color:var(--inst-mut);display:grid;place-items:center}
+.ib .ic{width:18px;height:18px}
+.ib[aria-pressed="true"]{color:var(--inst-ink);border-color:var(--inst-mut)}
+.led-wrap{height:clamp(190px,52vw,270px)}
+canvas{display:block;width:100%}
+.led-wrap canvas{height:100%}
+.readout{position:relative;min-height:84px;display:grid;place-items:center;align-content:center;gap:2px}
+.remain{display:inline-flex;align-items:baseline;font:600 76px/1 var(--font-disp);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;letter-spacing:.01em}
+.tenth{font-size:.62em;margin-left:.03em}
+.of{font:400 12px var(--font-mono);color:var(--inst-mut);margin-top:6px}
+.blindnote{position:absolute;inset:0;display:grid;place-items:center;color:var(--inst-mut)}
+.blindnote .ic{width:34px;height:34px}
+.app.blind .reveal{visibility:hidden}
+#mapCanvas{height:40px;border-radius:6px;touch-action:pan-y;cursor:ew-resize}
+.wfbox{position:relative;height:72px}
+.scopeBtn{position:absolute;top:6px;right:6px;min-width:46px;height:30px;padding:0 10px;border-radius:15px;border:1px solid var(--line);background:var(--bg);color:var(--muted);font:600 12px var(--font-mono)}
+#wfCanvas{position:absolute;inset:0;width:100%;height:100%;border-radius:8px;border:1px solid var(--line)}   /* out of flow, so its bitmap size never drives the layout */
+.inst:fullscreen{background:var(--bg);padding:24px;overflow:auto;justify-content:center}
+.inst:fullscreen .led-wrap{height:min(50vh,560px)}
+.inst:fullscreen .remain{font-size:96px}
+
+/* dock */
+.dock{flex:none;display:flex;flex-direction:column;gap:8px;padding:10px 0 12px;border-top:1px solid var(--line)}
+.prog{display:flex;justify-content:space-between;align-items:baseline;font:500 13px var(--font-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.pct{color:var(--ink);font-weight:600;font-size:15px}
+.bar2{height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.bar2 i{display:block;height:100%;width:0;background:var(--muted);border-radius:4px}
+.ctl{display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px}
+.cbtn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:54px;border-radius:16px;border:1px solid var(--line);background:var(--panel);font-weight:600}
+.cbtn.main{background:var(--btn);color:var(--btn-ink);border-color:var(--btn);font-size:17px}
+.cbtn:disabled{opacity:.4;cursor:default}
+.cbtn .ic{width:20px;height:20px}
+.cbtn.main .ic{fill:currentColor}
+.cbtn .ic.fill{fill:currentColor}
+
+/* settings */
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.sec>summary{list-style:none;display:flex;align-items:center;gap:12px;padding:12px 14px;min-height:58px;cursor:pointer;font-weight:600}
+.sec>summary::-webkit-details-marker{display:none}
+.sec>summary .st{flex:1;min-width:0}
+.sec>summary .sum{font:400 12px var(--font-mono);color:var(--muted);display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sec>summary .chev{width:18px;height:18px;color:var(--muted);transition:transform .15s}
+.sec[open]>summary .chev{transform:rotate(90deg)}
+.gchip{display:inline-block;width:46px;height:12px;border-radius:6px;border:1px solid var(--line)}
+.sbody{padding:6px 14px 16px;display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line)}
+.srow{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px}
+.sl{display:flex;align-items:center;gap:10px;font-weight:500;min-width:0}
+.sl .ic{color:var(--muted)}
+.pbar{display:flex;gap:8px;align-items:center}
+.pbar .rbtn{align-self:auto;flex:none}
+.pbar .txt{flex:1 1 0;min-width:0;width:0}
+.plist{display:flex;flex-direction:column}
+.prow{display:flex;align-items:center;gap:6px;min-height:54px;border-top:1px solid var(--line)}
+.prow:first-child{border-top:0}
+.pload{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:6px 4px;border:0;background:none;color:inherit;font:inherit;text-align:left}
+.pn{display:block;width:0;min-width:100%;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ps{display:block;width:0;min-width:100%;font:400 11px var(--font-mono);color:var(--muted);line-height:1.3;overflow-wrap:anywhere}
+.prow.on .pn::before{content:'';display:inline-block;width:8px;height:8px;margin-right:8px;border-radius:50%;background:var(--ok)}
+.prow .sb.arm{width:auto;border-radius:20px;padding:0 12px;font:600 12px var(--font-ui);background:var(--bad);border-color:var(--bad);color:#fff}
+.prow .txt{flex:1 1 0;min-width:0;width:0}
+.hint{display:block;font:400 11px var(--font-mono);color:var(--muted);line-height:1.1}
+.hint:empty{display:none}
+.step{display:flex;align-items:center;gap:6px;flex:none}
+.sb{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--field);display:grid;place-items:center}
+.sb .ic{width:18px;height:18px}
+.step input{width:60px;height:40px;text-align:center;border:1px solid var(--line);border-radius:10px;background:var(--field);font:500 16px var(--font-mono);padding:0}
+.unit{font:400 12px var(--font-mono);color:var(--muted);width:10px}
+.sw{position:relative;width:50px;height:30px;flex:none}
+.sw input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;cursor:pointer}
+.sw i{position:absolute;inset:0;border-radius:15px;background:var(--line);transition:background .15s}
+.sw i::after{content:"";position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:50%;background:var(--field);transition:transform .15s}
+.sw input:checked+i{background:var(--ink)}
+.sw input:checked+i::after{transform:translateX(20px);background:var(--btn-ink)}
+.sw input:focus-visible+i{outline:2px solid var(--focus);outline-offset:2px}
+.txt{width:100%;min-height:44px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--ink)}
+.nrow{display:grid;grid-template-columns:24px minmax(0,1fr) minmax(0,1fr);gap:8px;align-items:center}
+.nrow .n{font:500 12px var(--font-mono);color:var(--muted);text-align:center}
+.sub{border:1px solid var(--line);border-radius:12px;background:var(--field)}
+.sub>summary{list-style:none;display:flex;align-items:center;gap:10px;padding:10px 12px;min-height:44px;cursor:pointer;font-weight:500}
+.sub>summary::-webkit-details-marker{display:none}
+.sub>summary .chev{width:16px;height:16px;color:var(--muted);margin-left:auto;transition:transform .15s}
+.sub[open]>summary .chev{transform:rotate(90deg)}
+.sub .sbody{border-top:1px solid var(--line)}
+
+.pv{height:64px;border-radius:8px;border:1px solid var(--line)}
+.gh{font:500 12px var(--font-mono);color:var(--muted);margin-top:4px;letter-spacing:.04em;text-transform:uppercase}
+.rr{display:grid;grid-template-columns:52px minmax(0,1fr) 54px;gap:8px;align-items:center;min-height:34px}
+.rr label{font:400 12px var(--font-mono);color:var(--muted)}
+.rr output{font:500 12px var(--font-mono);text-align:right}
+.rr input[type=range]{width:100%;accent-color:var(--ink);margin:0}
+.rr .seg{grid-column:2/-1}
+.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{flex:1;border:0;background:var(--field);padding:8px 6px;font-weight:600;font-size:13px;min-height:38px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--btn);color:var(--btn-ink)}
+.stops{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.stops input[type=color]{width:50px;height:40px;padding:2px;border:1px solid var(--line);border-radius:10px;background:var(--field);cursor:pointer}
+.ibtn{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--field);display:grid;place-items:center}
+.ibtn:disabled{opacity:.4}
+.ibtn .ic{width:18px;height:18px}
+.rbtn{align-self:flex-start;display:flex;align-items:center;gap:8px;min-height:40px;padding:0 14px;border-radius:20px;border:1px solid var(--line);background:var(--field);font-weight:600;font-size:13px}
+.rbtn .ic{width:16px;height:16px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font:600 14px var(--font-mono);border:1px solid var(--line)}
+
+/* device */
+.pcard{border:1px solid var(--line);border-radius:12px;background:var(--field);padding:12px;display:flex;flex-direction:column;gap:10px}
+.ph{display:flex;align-items:center;gap:10px;font-weight:600}
+.ph .ic{color:var(--muted)}
+.pgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.pin{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:10px;padding:0 4px 0 8px;min-height:44px;background:var(--panel)}
+.pin.bad{border-color:var(--bad);box-shadow:inset 0 0 0 1px var(--bad)}
+.pl{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font:600 11px var(--font-mono);color:#fff;flex:none}
+.pl-r{background:#e5303c}.pl-g{background:#1fa463}.pl-b{background:#2f6bff}.pl-c{background:var(--muted);font-size:14px}
+.pin select{flex:1;min-width:0;border:0;background:transparent;font:500 15px var(--font-mono);min-height:42px;padding:0}
+.warnline{display:flex;align-items:center;gap:8px;color:var(--bad);font-weight:600;font-size:13px}
+.warnline .ic{width:18px;height:18px}
+.fwrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fbtn{display:flex;align-items:center;gap:8px;min-height:46px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--field);font-weight:600}
+.fbtn.primary{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
+.fbtn:disabled{opacity:.4;cursor:default}
+.fbtn .ic{width:18px;height:18px}
+.fname{font:400 12px var(--font-mono);color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.fbar{height:10px;border-radius:5px;background:var(--line);overflow:hidden}
+.fbar i{display:block;height:100%;width:0;background:var(--ok)}
+.badge{position:relative}
+.badge.on::after{content:"";position:absolute;top:6px;right:6px;width:10px;height:10px;border-radius:50%;background:var(--busy);border:2px solid var(--field)}
+.note{margin:0;color:var(--muted);font-size:13px}
+
+/* ===== landscape (phones turned sideways, tablets, desktop) =====
+   One row of chrome on top, the timer in two columns (LEDs left, time and scopes right), the dock as one row,
+   settings in as many columns as fit. Portrait keeps the single phone column above. */
+@media (orientation:landscape) and (min-width:560px){
+  body{padding-top:max(6px,env(safe-area-inset-top,0px));padding-bottom:max(6px,env(safe-area-inset-bottom,0px));align-items:stretch}
+  .app{max-width:1200px;max-height:none;border:0;border-radius:0;padding:0;overflow:visible;gap:8px 12px;
+       display:grid;grid-template-columns:1fr auto 1fr;grid-template-rows:auto minmax(0,1fr) auto}
+  .top{display:contents}
+  .brand{grid-column:1;grid-row:1;align-self:center}
+  .tabs{grid-column:2;grid-row:1;width:min(300px,40vw)}
+  .tabs button{min-height:38px}
+  .tools{grid-column:3;grid-row:1;justify-self:end}
+  .screens{grid-column:1/-1;grid-row:2;padding-bottom:0}
+
+  #screenTimer:not([hidden]){flex:1 0 auto;min-height:0}
+  .inst{flex:1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto auto minmax(56px,1fr);
+        column-gap:18px;row-gap:8px;min-height:236px;max-height:560px;margin-block:auto}   /* tall windows: stop growing and center */
+  .inst-head{grid-column:2;grid-row:1}
+  .led-wrap{grid-column:1;grid-row:1/5;position:relative;height:auto;min-height:0}
+  .led-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
+  .readout{grid-column:2;grid-row:2;min-height:0;padding:2px 0}
+  #mapCanvas{grid-column:2;grid-row:3}
+  .wfbox{grid-column:2;grid-row:4;height:auto;min-height:56px}
+  .remain{font-size:clamp(44px,17vh,104px)}
+  .inst:fullscreen{max-height:none;margin-block:0}
+  .inst:fullscreen .led-wrap{height:auto}
+  .inst:fullscreen .remain{font-size:clamp(56px,20vh,140px)}
+
+  #screenSet:not([hidden]){display:block;columns:360px;column-gap:12px}
+  #screenSet .sec{break-inside:avoid;margin-bottom:12px}
+
+  .dock{grid-column:1/-1;grid-row:3;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"prog ctl" "bar ctl";
+        column-gap:20px;row-gap:6px;align-items:center;padding:8px 0 4px}
+  .prog{grid-area:prog}
+  .bar2{grid-area:bar}
+  .ctl{grid-area:ctl;grid-template-columns:auto auto auto}
+  .cbtn{min-height:48px;padding:0 20px}
+  .cbtn.main{min-width:150px}
+}
+@media (orientation:landscape) and (min-width:560px) and (max-height:520px){
+  .brand{font-size:20px}
+  .tabs button{min-height:34px}
+  .ib{width:32px;height:32px}
+  .phase{font-size:22px}
+  .cbtn{min-height:44px}
+  .dock{padding:6px 0 2px}
+}
+</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4v4.5h4.5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-eyeoff" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0"/><circle cx="12" cy="19.5" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2.5h5"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h4l2-6 4 12 3-9 2 3h5"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 12c2.5-7 5-7 7.5 0s5 7 7.5 0c1-2.5 2-3.5 3-3.5"/></symbol>
+    <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3"/></symbol>
+    <symbol id="i-loop" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5zM8 3v6h7V3M8 21v-7h8v7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 3v18M5 4h12l-2.5 4.5L17 13H5"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3 12V4h8l10 10-8 8z"/><circle cx="8" cy="9" r="1.5"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2zM12 10v5M12 18v.5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+  <header class="top">
+    <div class="brand">Beacon</div>
+    <div class="tools">
+      <button class="ib" id="themeBtn" type="button" aria-label="Dark mode"><svg class="ic" id="themeIc"><use href="#i-moon"/></svg></button>
+      <div class="link" id="linkChip"><span class="dotc" id="linkDot"></span><svg class="ic"><use href="#i-wifi"/></svg><span id="linkTxt">192.168.4.1</span></div>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Screens">
+    <button type="button" role="tab" id="tabT" aria-selected="true" aria-controls="screenTimer"><svg class="ic"><use href="#i-clock"/></svg>Timer</button>
+    <button type="button" role="tab" id="tabS" aria-selected="false" aria-controls="screenSet"><svg class="ic"><use href="#i-sliders"/></svg>Settings</button>
+  </nav>
+
+  <main class="screens" id="screens">
+    <!-- ========== TIMER ========== -->
+    <section id="screenTimer" role="tabpanel" aria-labelledby="tabT">
+      <div class="inst" id="inst">
+        <div class="inst-head">
+          <div class="phase reveal"><span class="dot" id="phaseDot"></span><span id="phaseName">Ready</span></div>
+          <div class="head-r">
+            <span class="setline reveal" id="setLine">1 / 4</span>
+            <button class="ib" id="blindBtn" type="button" aria-pressed="false" aria-label="Hide numbers"><svg class="ic" id="blindIc"><use href="#i-eye"/></svg></button>
+            <button class="ib" id="fsBtn" type="button" aria-label="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></button>
+          </div>
+        </div>
+        <div class="led-wrap"><canvas id="ledCanvas" role="img" aria-label="Simulated LEDs: timer and set"></canvas></div>
+        <div class="readout">
+          <div class="reveal" style="display:grid;place-items:center">
+            <div class="remain" id="remain" aria-label="Time remaining"><span id="rMain">0:30</span><span class="tenth" id="rTenth">.0</span></div>
+            <div class="of" id="ofLen"></div>
+          </div>
+          <div class="blindnote" id="blindNote" hidden><svg class="ic"><use href="#i-eyeoff"/></svg></div>
+        </div>
+        <canvas id="mapCanvas" tabindex="0" role="slider" aria-label="Session position in seconds" aria-valuemin="0" aria-valuemax="160" aria-valuenow="0"></canvas>
+        <div class="wfbox"><canvas id="wfCanvas" aria-hidden="true"></canvas><button class="scopeBtn" id="scopeBtn" type="button">All</button></div>
+      </div>
+    </section>
+
+    <!-- ========== SETTINGS ========== -->
+    <section id="screenSet" role="tabpanel" aria-labelledby="tabS" hidden>
+      <details class="sec" id="sec-presets" open>
+        <summary><svg class="ic"><use href="#i-save"/></svg><span class="st">Saved timers</span><span class="sum" id="sum-presets"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody">
+          <div class="pbar">
+            <input class="txt" id="pName" type="text" maxlength="24" placeholder="Name this timer" aria-label="Name for a new saved timer" enterkeyhint="done">
+            <button class="rbtn" id="pAdd" type="button"><svg class="ic"><use href="#i-plus"/></svg><span>Save</span></button>
+          </div>
+          <div id="pList" class="plist"></div>
+          <p class="note" id="pMsg" aria-live="polite"></p>
+        </div>
+      </details>
+
+      <details class="sec" id="sec-timing" open>
+        <summary><svg class="ic"><use href="#i-clock"/></svg><span class="st">Timing</span><span class="sum" id="sum-timing"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody" id="timingBox"></div>
+      </details>
+
+      <details class="sec" id="sec-names">
+        <summary><svg class="ic"><use href="#i-tag"/></svg><span class="st">Names</span><span class="sum" id="sum-names"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody">
+          <div id="namesBox" class="sbody" style="padding:0;border:0"></div>
+          <details class="sub" id="subNames">
+            <summary><svg class="ic"><use href="#i-repeat"/></svg>Each set<svg class="ic chev"><use href="#i-chev"/></svg></summary>
+            <div class="sbody" id="setNames"></div>
+          </details>
+        </div>
+      </details>
+
+      <details class="sec" id="sec-load">
+        <summary><svg class="ic"><use href="#i-pulse"/></svg><span class="st" id="stLoad">Load</span><span class="sum"><i class="gchip" id="gr-load"></i></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody" id="ed-load"></div>
+      </details>
+
+      <details class="sec" id="sec-trans">
+        <summary><svg class="ic"><use href="#i-wave"/></svg><span class="st" id="stTrans">Transition</span><span class="sum"><i class="gchip" id="gr-trans"></i></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody" id="ed-trans"></div>
+      </details>
+
+      <details class="sec" id="sec-lead" hidden>
+        <summary><svg class="ic"><use href="#i-flag"/></svg><span class="st" id="stLead">Lead-in</span><span class="sum"><i class="gchip" id="gr-lead"></i></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody" id="ed-lead"></div>
+      </details>
+
+      <details class="sec" id="sec-led">
+        <summary><svg class="ic"><use href="#i-sun"/></svg><span class="st">LEDs</span><span class="sum" id="sum-led"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody" id="ledBox">
+          <div class="chips" id="chips" aria-label="Colors of the second LED"></div>
+        </div>
+      </details>
+
+      <details class="sec" id="sec-dev">
+        <summary><svg class="ic"><use href="#i-chip"/></svg><span class="st">Device</span><span class="sum" id="sum-dev"></span><svg class="ic chev"><use href="#i-chev"/></svg></summary>
+        <div class="sbody">
+          <div id="pinsBox" class="sbody" style="padding:0;border:0"></div>
+          <div class="warnline" id="pinWarn" hidden><svg class="ic"><use href="#i-warn"/></svg><span>Pin used twice</span></div>
+          <div class="pcard" id="fwCard">
+            <div class="ph"><svg class="ic"><use href="#i-upload"/></svg><span>Sketch</span><span class="mono" id="fwVer" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)">demo</span></div>
+            <div class="fwrow">
+              <input type="file" id="fwFile" accept=".bin,application/octet-stream" hidden>
+              <button class="fbtn" id="fwPick" type="button"><svg class="ic"><use href="#i-file"/></svg>Choose .bin</button>
+              <span class="fname" id="fwName">No file</span>
+            </div>
+            <div class="fbar" id="fwBar" hidden><i id="fwFill"></i></div>
+            <div class="fwrow">
+              <button class="fbtn primary" id="fwGo" type="button" disabled><svg class="ic"><use href="#i-upload"/></svg><span id="fwGoTxt">Upload</span></button>
+              <button class="fbtn badge" id="rebootBtn" type="button"><svg class="ic"><use href="#i-power"/></svg>Reboot</button>
+            </div>
+          </div>
+          <div class="pcard" id="netCard">
+            <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Network</span><span class="mono" id="netStat" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
+            <div class="srow">
+              <span class="sl"><span>Home Wi-Fi</span></span>
+              <label class="sw"><input type="checkbox" id="netSta" role="switch" aria-label="Join home Wi-Fi"><i></i></label>
+            </div>
+            <p class="note" id="netNote" aria-live="polite"></p>
+            <div class="fwrow">
+              <button class="fbtn" id="sleepBtn" type="button" hidden><svg class="ic"><use href="#i-moon"/></svg><span>Sleep</span></button>
+              <button class="fbtn primary" id="wakeBtn" type="button" hidden><svg class="ic"><use href="#i-sun"/></svg><span>Wake</span></button>
+              <button class="fbtn primary" id="netGo" type="button" hidden><svg class="ic"><use href="#i-power"/></svg><span id="netGoTxt">Reboot</span></button>
+            </div>
+          </div>
+          <div class="pcard" id="upCard">
+            <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Online update</span><span class="mono" id="upLast" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
+            <input class="txt" id="upSsid" type="text" maxlength="32" placeholder="Wi-Fi name (2.4 GHz)" aria-label="Wi-Fi network name" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <input class="txt" id="upPass" type="password" maxlength="63" placeholder="Wi-Fi password" aria-label="Wi-Fi password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <details class="sub" id="upAdv">
+              <summary><svg class="ic"><use href="#i-link"/></svg>GitHub source<svg class="ic chev"><use href="#i-chev"/></svg></summary>
+              <div class="sbody">
+                <input class="txt" id="upRepo" type="text" maxlength="140" placeholder="owner/repository" aria-label="GitHub repository" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <input class="txt" id="upTok" type="password" maxlength="255" placeholder="Access token (private repo only)" aria-label="GitHub access token" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <p class="note">Leave the token empty for a public repository. For a private one, use a read-only token (Contents: read).</p>
+                <button class="rbtn" id="upTokClear" type="button" hidden><svg class="ic"><use href="#i-x"/></svg><span>Remove saved token</span></button>
+              </div>
+            </details>
+            <div class="fwrow">
+              <button class="fbtn" id="upSave" type="button"><svg class="ic"><use href="#i-save"/></svg>Save</button>
+              <button class="fbtn primary" id="upGo" type="button" disabled><svg class="ic"><use href="#i-upload"/></svg><span id="upGoTxt">Update now</span></button>
+            </div>
+            <p class="note" id="upNote" aria-live="polite"></p>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="dock">
+    <div class="prog reveal" aria-live="off"><span id="elapsed">0:00</span><span class="pct" id="pct">0%</span><span id="totalT">3:08</span></div>
+    <div class="bar2 reveal" role="progressbar" aria-label="Session progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="barFill"></i></div>
+    <div class="ctl">
+      <button class="cbtn main" id="goBtn" type="button"></button>
+      <button class="cbtn" id="stopBtn" type="button"><svg class="ic"><use href="#i-stop"/></svg><span>Stop</span></button>
+      <button class="cbtn" id="resetBtn" type="button"><svg class="ic"><use href="#i-reset"/></svg><span>Reset</span></button>
+    </div>
+  </footer>
+</div>
+
+<script>
+/* ============ helpers ============ */
+const $=s=>document.querySelector(s);
+const TAU=Math.PI*2;
+const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const smooth=(a,b,x)=>{ if(a===b) return x<a?0:1; const t=clamp((x-a)/(b-a),0,1); return t*t*(3-2*t); };
+const GAMMA=2.2;
+const hexToRgb=h=>{ const n=parseInt(h.slice(1),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const rgbCss=c=>`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+/* mix in approximately linear light so green to red passes through yellow, as a real LED would */
+const mixRgb=(a,b,t)=>a.map((v,i)=>Math.pow(lerp(Math.pow(v/255,GAMMA),Math.pow(b[i]/255,GAMMA),t),1/GAMMA)*255);
+function hslToRgb(h,s,l){
+  const f=n=>{ const k=(n+h*12)%12; return l-s*Math.min(l,1-l)*Math.max(-1,Math.min(k-3,9-k,1)); };
+  return [f(0)*255,f(8)*255,f(4)*255];
+}
+/* Color across a window. K stops share the window equally (quartiles, thirds...).
+   blend 0 = hard steps; blend 1 = smooth glide that is exactly each stop at its segment center. */
+function gradientAt(stops,p,blend){
+  const K=stops.length; if(K===1) return stops[0];
+  p=clamp(p,0,0.99999); const x=p*K; const w=clamp(blend,0,1); const j=Math.round(x);
+  if(w>0&&j>=1&&j<=K-1){ const d=x-j; if(Math.abs(d)<w/2) return mixRgb(stops[j-1],stops[j],smooth(-w/2,w/2,d)); }
+  return stops[Math.min(K-1,Math.floor(x))];
+}
+/* One pulse across a cycle phase x (0..1): lit for `duty` of the cycle, edges ramped by `soft` (the PWM ramp) */
+function pulseShape(x,duty,soft){
+  if(x>=duty) return 0;
+  const u=x/duty, e=clamp(soft*0.5,0.015,0.5);
+  return smooth(0,e,u)*(1-smooth(1-e,1,u));
+}
+const p2=n=>String(n).padStart(2,'0');
+const fmtDur=s=>{ s=Math.round(s); return s>=3600?`${Math.floor(s/3600)}:${p2(Math.floor(s%3600/60))}:${p2(s%60)}`:`${Math.floor(s/60)}:${p2(s%60)}`; };
+const fmtN=n=>(Math.round(n*10)/10).toString();
+const ICON=(n,extra)=>`<svg class="ic${extra?' '+extra:''}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+function el(tag,cls,html){ const e=document.createElement(tag); if(cls) e.className=cls; if(html!=null) e.innerHTML=html; return e; }
+
+/* ============ window styles ============ */
+const PAL={ load:['#22e070','#ffd51a','#ff7a14','#ff1f2d'], trans:['#2d6bff','#8b4dff','#ff3fd8'] };
+const stopsOf=prof=>prof.colors.map(hexToRgb);
+const CURVES=[[1,'Linear'],[2,'Squared'],[3,'Cubic']];
+
+/* Accelerating rate: f(p) = f0 + (f1 - f0) * p^n. `q` is the same curve as a 0..1 share, so duty cycle and
+   edge softness move along with the rate. `cyc` is the closed-form integral of the rate (pulse phase in cycles). */
+function accel(local,len,f0,f1,n){
+  const p=clamp(local/len,0,1);
+  return {q:Math.pow(p,n),cyc:f0*local+(f1-f0)*len/(n+1)*Math.pow(p,n+1)};
+}
+
+/* Load window. The last `final` seconds (30 by default; the whole window when it is shorter) run the accelerating pulse:
+   rate, duty cycle and edge softness all follow one curve and the colors step through the gradient. Anything longer than
+   that is a "long load": before the final stretch the light pulses slowly, one color after another, each color getting an
+   equal share of the time; the final stretch then starts again at the first color. */
+const PULSE={
+  schema:[
+    {g:'Start of window'},
+    {k:'solid',l:'Solid',min:0,max:10,step:0.5,u:' s'},
+    {k:'fade',l:'Fade',min:0,max:5,step:0.5,u:' s'},
+    {g:'Long loads'},
+    {k:'final',l:'Final',min:10,max:120,step:5,u:' s'},
+    {k:'longCycle',l:'Cycle',min:2,max:20,step:1,u:' s'},
+    {k:'longDim',l:'Dim',min:0,max:60,step:1,u:'%'},
+    {k:'markEvery',l:'Marks',min:0,max:600,step:10,u:' s',off:'off'},
+    {g:'Rate per final stretch'},
+    {k:'rate0',l:'Start',min:1,max:60,step:1,u:''},
+    {k:'rate1',l:'End',min:2,max:300,step:1,u:''},
+    {k:'curve',l:'Curve',choice:CURVES},
+    {g:'Duty'},
+    {k:'duty0',l:'Start',min:5,max:95,step:1,u:'%'},
+    {k:'duty1',l:'End',min:5,max:95,step:1,u:'%'},
+    {g:'Edge'},
+    {k:'soft0',l:'Start',min:0,max:100,step:1,u:'%'},
+    {k:'soft1',l:'End',min:0,max:100,step:1,u:'%'},
+    {g:'Light'},
+    {k:'floor',l:'Glow',min:0,max:40,step:1,u:'%'},
+    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'}
+  ],
+  segments:prof=>prof.colors.length,
+  first:prof=>hexToRgb(prof.colors[0]),
+  colorAt(prof,p,L){ return PULSE.led({len:L},p*L,prof,{maxHz:99}).c; },
+  led(win,local,prof,G){
+    const L=win.len, F=Math.min(prof.final,L), head=L-F, K=prof.colors.length;
+    let c,b;
+    if(local<head){                                                   /* long load: slow pulses, one color per equal share */
+      const seg=head/K, w=Math.min(prof.blend/100,3/seg);              /* colors change at once, with at most a 3 s crossfade */
+      c=gradientAt(stopsOf(prof),local/head,w);
+      const dim=prof.longDim/100;
+      b=dim+(1-dim)*(0.5+0.5*Math.cos(TAU*local/prof.longCycle));     /* starts at the peak, like the start flash */
+    }else{                                                            /* final stretch: the normal accelerating sequence from the first color */
+      const lt=local-head, f0=Math.min(prof.rate0/F,G.maxHz), f1=Math.min(prof.rate1/F,G.maxHz), fl=prof.floor/100;
+      const a=accel(lt,F,f0,f1,prof.curve);
+      const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
+      b=fl+(1-fl)*w; c=gradientAt(stopsOf(prof),lt/F,prof.blend/100);
+    }
+    /* the first seconds are a solid light in the first color, then it fades out into what follows */
+    const S=Math.min(prof.solid,L*0.5), Fd=Math.min(prof.fade,L*0.25);
+    if(local<S) b=1; else if(local<S+Fd) b=1+(b-1)*smooth(S,S+Fd,local);
+    /* time marks (long loads only): a quick double flash every `markEvery` seconds, so you can tell how far along you are */
+    if(prof.markEvery>0&&local>=prof.markEvery&&local<head){ const m=local%prof.markEvery; if(m<0.5) b=(m<0.12||(m>=0.25&&m<0.37))?1:0; }
+    return {c,b};
+  }
+};
+
+/* Transition and lead-in: slow constant breathing, then the last seconds ramp from a slow to a fast pulse. */
+const TRANS={
+  schema:[
+    {g:'Breath'},
+    {k:'breath',l:'Cycle',min:1,max:8,step:0.5,u:' s'},
+    {k:'floor',l:'Dim',min:0,max:40,step:1,u:'%'},
+    {g:'Ramp'},
+    {k:'tail',l:'Length',min:1,max:10,step:0.5,u:' s'},
+    {k:'f0',l:'From',min:0.5,max:6,step:0.5,u:' Hz'},
+    {k:'f1',l:'To',min:2,max:12,step:0.5,u:' Hz'},
+    {k:'curve',l:'Curve',choice:CURVES},
+    {g:'Duty'},
+    {k:'duty0',l:'Start',min:5,max:95,step:1,u:'%'},
+    {k:'duty1',l:'End',min:5,max:95,step:1,u:'%'},
+    {g:'Edge'},
+    {k:'soft0',l:'Start',min:0,max:100,step:1,u:'%'},
+    {k:'soft1',l:'End',min:0,max:100,step:1,u:'%'},
+    {g:'Light'},
+    {k:'blend',l:'Blend',min:0,max:100,step:1,u:'%'}
+  ],
+  segments:prof=>prof.colors.length,
+  first:prof=>hexToRgb(prof.colors[0]),
+  colorAt:(prof,p)=>gradientAt(stopsOf(prof),p,prof.blend/100),
+  led(win,local,prof){
+    const L=win.len, tail=Math.min(prof.tail,L), ts=L-tail, fl=prof.floor/100;
+    const c=gradientAt(stopsOf(prof),local/L,prof.blend/100);
+    let w;
+    if(local<ts){ w=0.5+0.5*Math.cos(TAU*(local/prof.breath)); }     /* starts at the peak, so it flows out of the start flash */
+    else{
+      const a=accel(local-ts,tail,prof.f0,prof.f1,prof.curve);
+      w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
+    }
+    return {c,b:fl+(1-fl)*w};
+  }
+};
+
+/* Red hold: a solid red pause after every load. Part of neither the load nor the transition. */
+const HOLD_COL=[255,31,45];
+const HOLD={ segments:()=>0, first:()=>HOLD_COL, colorAt:()=>HOLD_COL, led:()=>({c:HOLD_COL,b:1}) };
+
+function implFor(c,type){
+  if(type==='load') return {impl:PULSE,prof:c.profiles.load};
+  if(type==='hold') return {impl:HOLD,prof:null};
+  if(type==='lead') return {impl:TRANS,prof:c.leadSame?c.profiles.trans:c.profiles.lead};
+  return {impl:TRANS,prof:c.profiles.trans};
+}
+
+const PIN_CHOICES=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,21];   /* S3 GPIOs that are free: not USB (19, 20), flash/PSRAM (26-32) or the boot strap (0) */
+function transProfile(){ return {breath:2,floor:6,tail:5,f0:1,f1:7,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,blend:40,colors:[...PAL.trans]}; }
+function defaults(){
+  return {
+    loadSec:30,transSec:15,sets:5,repeat:4,trackRepeats:false,redHold:2,skipFinal:true,
+    lead:true,leadSame:true,leadSec:15,
+    names:{load:'Load',trans:'Transition',lead:'Lead-in',hold:'Hold'},
+    loadNames:{},transNames:{},
+    holdMs:0,maxHz:7,master:100,blind:false,
+    pins:{timer:{r:13,g:11,b:10,com:12,anode:true},set:{r:2,g:4,b:5,com:3,anode:true}},
+    profiles:{
+      load:{solid:3,fade:1,final:30,longCycle:4,longDim:15,markEvery:0,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
+      trans:transProfile(),
+      lead:transProfile()
+    }
+  };
+}
+
+/* ============ config and storage ============ */
+const STORE_KEY='interval-beacon-v8';
+function merge(d,s){
+  if(!s||typeof s!=='object') return;
+  for(const k of Object.keys(d)){
+    if(!(k in s)) continue;
+    const dv=d[k],sv=s[k];
+    if(Array.isArray(dv)){ if(Array.isArray(sv)&&sv.length>=2&&sv.length<=5&&sv.every(x=>/^#[0-9a-f]{6}$/i.test(x))) d[k]=sv.slice(); }
+    else if(dv&&typeof dv==='object') merge(dv,sv);
+    else if(typeof dv===typeof sv&&(typeof sv!=='number'||isFinite(sv))) d[k]=sv;
+  }
+}
+function normalize(raw){
+  const d=defaults();
+  if(raw&&typeof raw==='object'){
+    merge(d,raw);
+    for(const k of ['loadNames','transNames']){ const o=raw[k]; if(o&&typeof o==='object') for(const [i,v] of Object.entries(o)) if(/^\d{1,2}$/.test(i)&&typeof v==='string') d[k][i]=v.slice(0,24); }
+  }
+  for(const k of Object.keys(d.names)) d.names[k]=String(d.names[k]).slice(0,24);
+  d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
+  d.profiles.load.solid=clamp(d.profiles.load.solid,0,10); d.profiles.load.fade=clamp(d.profiles.load.fade,0,5);
+  { const L=d.profiles.load; L.final=clamp(L.final,10,120); L.longCycle=clamp(L.longCycle,2,20); L.longDim=clamp(L.longDim,0,60); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); }
+  d.leadSec=clamp(d.leadSec,1,600); d.holdMs=clamp(d.holdMs,0,1000); d.maxHz=clamp(d.maxHz,1,8); d.master=clamp(d.master,10,100);
+  const dp=defaults().pins;
+  for(const k of ['timer','set']){
+    for(const ch of ['r','g','b']) if(!PIN_CHOICES.includes(d.pins[k][ch])) d.pins[k][ch]=dp[k][ch];
+    const c=d.pins[k].com; if(c!==-1&&!PIN_CHOICES.includes(c)) d.pins[k].com=dp[k].com;
+  }
+  return d;
+}
+function loadCfg(){
+  let raw=null;
+  try{
+    raw=JSON.parse(localStorage.getItem(STORE_KEY)||'null');
+    if(!raw){ const v7=JSON.parse(localStorage.getItem('interval-beacon-v7')||'null'); if(v7){ if(v7.sets===4) delete v7.sets; raw=v7; } }   /* old default of 4 sets follows the new default of 5 */
+    if(!raw){ const v6=JSON.parse(localStorage.getItem('interval-beacon-v6')||'null'); if(v6){ delete v6.pins; raw=v6; } }
+    if(!raw){ const old=JSON.parse(localStorage.getItem('interval-beacon-v5')||'null'); if(old){ if('leadTrans' in old) old.lead=old.leadTrans; raw=old; } }
+  }catch(e){ raw=null; }
+  return normalize(raw);
+}
+let cfg=loadCfg();
+let CFG_VER=0, saveT=0;
+function scheduleSave(){ clearTimeout(saveT); saveT=setTimeout(()=>{ try{ localStorage.setItem(STORE_KEY,JSON.stringify(cfg)); }catch(e){} },300); devPush(); }
+
+/* ============ theme ============ */
+/* One background for the whole page. Canvases read the live theme tokens so they match in light and dark. */
+const TH={light:true,bg:[243,245,246],ink:'#12171a',muted:'#5b6870',line:'#cfd6da'};
+function readTheme(){
+  const cs=getComputedStyle(document.documentElement), v=n=>cs.getPropertyValue(n).trim();
+  const bg=v('--bg'), rgb=/^#[0-9a-f]{6}$/i.test(bg)?hexToRgb(bg):TH.bg;
+  TH.bg=rgb; TH.ink=v('--ink')||TH.ink; TH.muted=v('--muted')||TH.muted; TH.line=v('--line')||TH.line;
+  TH.light=(0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2])>140;
+}
+const shade=c=>TH.light?c.map(v=>v*0.8):c;   /* pale colors such as yellow need a little weight on a light page */
+const THEME_KEY='interval-beacon-theme';
+function syncThemeBtn(){ $('#themeIc').innerHTML=`<use href="#i-${TH.light?'moon':'sun'}"/>`; $('#themeBtn').setAttribute('aria-label',TH.light?'Dark mode':'Light mode'); }
+function themeChanged(){ readTheme(); CFG_VER++; syncThemeBtn(); }
+try{ const m=localStorage.getItem(THEME_KEY); if(m==='light'||m==='dark') document.documentElement.setAttribute('data-theme',m); }catch(e){}
+readTheme(); syncThemeBtn();
+$('#themeBtn').addEventListener('click',()=>{
+  const m=TH.light?'dark':'light'; document.documentElement.setAttribute('data-theme',m);
+  try{ localStorage.setItem(THEME_KEY,m); }catch(e){}
+});
+new MutationObserver(themeChanged).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme','class','style']});
+try{ matchMedia('(prefers-color-scheme: dark)').addEventListener('change',themeChanged); }catch(e){}
+
+/* ============ session plan ============ */
+function buildWindows(c){
+  const wins=[]; let start=0;
+  const push=(type,set,len,rep=1)=>{ wins.push({type,set,len,start,rep}); start+=len; };
+  if(c.lead){ const len=c.leadSame?c.transSec:c.leadSec; if(len>0) push('lead',0,len); }
+  for(let r=1;r<=c.repeat;r++) for(let i=0;i<c.sets;i++){
+    push('load',i+1,c.loadSec,r);
+    if(c.redHold>0) push('hold',i+1,c.redHold,r);                       /* red hold after every load, last one included */
+    const last=i===c.sets-1&&r===c.repeat;                              /* only the very last set can skip its transition */
+    if(c.transSec>0&&!(last&&c.skipFinal)) push('trans',i+1,c.transSec,r);
+  }
+  return {wins,total:start};
+}
+function locate(wins,total,t){
+  if(t>=total){ const w=wins[wins.length-1]; return {done:true,win:w,idx:wins.length-1,local:w.len,p:1}; }
+  let idx=0; for(let i=0;i<wins.length;i++){ if(t>=wins[i].start) idx=i; else break; }
+  const win=wins[idx], local=t-win.start; return {done:false,win,idx,local,p:local/win.len};
+}
+function winName(c,win){
+  const n=c.names;
+  if(win.type==='load') return c.loadNames[win.set]||n.load||'Load';
+  if(win.type==='trans') return c.transNames[win.set]||n.trans||'Transition';
+  if(win.type==='lead') return n.lead||'Lead-in';
+  return n.hold||'Hold';
+}
+
+/* Set colors. The last three sets are always green, yellow, red. Extra sets are prepended, newest in front. */
+const EXTRA=['#2d6bff','#ff3fd8','#19d3ff','#8b4dff','#ffffff'];
+function extraColor(i){
+  if(i<EXTRA.length) return hexToRgb(EXTRA[i]);
+  return hslToRgb((165+(((i-EXTRA.length)*0.618)%1)*180)/360,1,0.55);   /* cyan through pink, away from green, yellow and red */
+}
+function setColors(N){
+  const tail=[[34,224,112],[255,213,26],[255,31,45]];
+  const out=[]; for(let i=0;i<N;i++){ const fromEnd=N-1-i; out.push(fromEnd<3?tail[2-fromEnd]:extraColor(fromEnd-3)); }
+  return out;
+}
+const trackN=c=>c.trackRepeats?c.repeat:c.sets;      /* how many colors LED 2 steps through: one per set, or one per repeat */
+let PLAN=buildWindows(cfg), SET_COLORS=setColors(trackN(cfg));
+
+/* ============ LED outputs ============ */
+function led1(c,win,local){
+  const {impl,prof}=implFor(c,win.type);
+  let out=impl.led(win,local,prof,c);
+  const hold=c.holdMs/1000;
+  if(hold>0&&local<Math.min(hold,win.len*0.25)) out={c:impl.first(prof),b:1};   /* solid flash marks a window start */
+  return out;
+}
+/* set number LED 2 refers to: the upcoming set during a transition or lead-in */
+/* the set (and repeat) a window leads into: transitions and the lead-in point at the next one, wrapping to set 1 of the next repeat */
+function nextOf(c,win){
+  if(win.type==='lead') return {set:1,rep:1};
+  if(win.type!=='trans') return {set:win.set,rep:win.rep};
+  return win.set>=c.sets?{set:1,rep:Math.min(c.repeat,win.rep+1)}:{set:win.set+1,rep:win.rep};
+}
+const setOf=(c,win)=>nextOf(c,win).set;
+function led2(c,win){ const n=nextOf(c,win); return {c:SET_COLORS[(c.trackRepeats?n.rep:n.set)-1],b:0.85}; }   /* solid color for the set, or for the repeat */
+
+/* ============ timer state ============ */
+const S={state:'idle',t:0,wake:null};
+function releaseWake(){ try{ if(S.wake){ S.wake.release(); S.wake=null; } }catch(e){} }
+function acquireWake(){ try{ if(navigator.wakeLock&&!S.wake) navigator.wakeLock.request('screen').then(l=>{ S.wake=l; l.addEventListener('release',()=>{ if(S.wake===l) S.wake=null; }); }).catch(()=>{}); }catch(e){} }
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'&&S.state==='run') acquireWake(); });
+
+function doReset(){ S.state='idle'; S.t=0; releaseWake(); updateButtons(); devCmd('reset'); }
+function doStart(){
+  if(S.state==='done'||S.state==='stopped'||S.t>=PLAN.total) S.t=0;
+  S.state='run'; acquireWake(); updateButtons(); devCmd('start',S.t);
+}
+function doPause(){ S.state='pause'; releaseWake(); updateButtons(); devCmd('pause'); }
+function doStop(){ if(S.state==='run'||S.state==='pause'||(S.state==='preview'&&S.t>0)){ S.state='stopped'; releaseWake(); updateButtons(); devCmd('stop'); } }
+function seek(t){
+  S.t=clamp(t,0,PLAN.total-0.001);
+  if(S.state!=='run') S.state='preview';
+  updateButtons(); devSeek(S.t);
+}
+const goBtn=$('#goBtn'), stopBtn=$('#stopBtn'), resetBtn=$('#resetBtn');
+function updateButtons(){
+  const run=S.state==='run';
+  const label=run?'Pause':((S.state==='pause'||(S.state==='preview'&&S.t>0))?'Resume':'Start');
+  if(goBtn._l!==label){ goBtn._l=label; goBtn.innerHTML=`${ICON(run?'pause':'play')}<span>${label}</span>`; }
+  stopBtn.disabled=!(S.state==='run'||S.state==='pause'||(S.state==='preview'&&S.t>0));
+  resetBtn.disabled=(S.state==='idle'&&S.t===0);
+}
+
+/* ============ canvases ============ */
+const ledCv=$('#ledCanvas'), mapCv=$('#mapCanvas'), wfCv=$('#wfCanvas');
+const ledG=ledCv.getContext('2d'), mapG=mapCv.getContext('2d'), wfG=wfCv.getContext('2d');
+let DPR=1;
+function fit(cv){
+  const r=cv.getBoundingClientRect(); DPR=Math.min(2,window.devicePixelRatio||1);
+  const w=Math.max(1,Math.round(r.width*DPR)), h=Math.max(1,Math.round(r.height*DPR));
+  if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; return true; }
+  return false;
+}
+function drawLed(g,cx,cy,r,o){
+  const b=clamp(o.b,0,1),R=o.c[0],G=o.c[1],B=o.c[2],light=TH.light;
+  const maxR=Math.min(r*2.6,o.room||r*2.6);                       /* the glow never reaches the canvas edge, so it can't show a box */
+  if(maxR>r*1.1&&b>0.01){
+    g.save(); if(!light) g.globalCompositeOperation='lighter';
+    const bl=g.createRadialGradient(cx,cy,r*0.9,cx,cy,maxR), a=(light?0.34:0.36)*b;
+    bl.addColorStop(0,`rgba(${R|0},${G|0},${B|0},${a})`); bl.addColorStop(1,`rgba(${R|0},${G|0},${B|0},0)`);
+    g.fillStyle=bl; g.beginPath(); g.arc(cx,cy,maxR,0,TAU); g.fill(); g.restore();
+  }
+  g.beginPath(); g.arc(cx,cy,r*1.17,0,TAU); g.fillStyle=light?'#2b343b':'#0e1317'; g.fill();
+  g.lineWidth=Math.max(1.5,r*0.03); g.strokeStyle=light?'#4a565f':'#26313a'; g.stroke();
+  /* The lens shows the true color at its brightness, the same color the scope bars use: no white blend, and only a light
+     falloff at the rim for a rounded look. */
+  const lvl=0.04+0.96*b, k=f=>`rgb(${(R*lvl*f)|0},${(G*lvl*f)|0},${(B*lvl*f)|0})`;
+  const lens=g.createRadialGradient(cx-r*0.12,cy-r*0.14,r*0.05,cx,cy,r);
+  lens.addColorStop(0,k(1)); lens.addColorStop(0.72,k(0.98)); lens.addColorStop(1,k(0.86));
+  g.beginPath(); g.arc(cx,cy,r,0,TAU); g.fillStyle=lens; g.fill();
+  g.beginPath(); g.ellipse(cx-r*0.3,cy-r*0.4,r*0.22,r*0.1,-0.5,0,TAU); g.fillStyle=`rgba(255,255,255,${0.04+0.08*b})`; g.fill();   /* small glint */
+}
+function drawStage(o1,o2){
+  fit(ledCv); const W=ledCv.width/DPR, H=ledCv.height/DPR, m=cfg.master/100;
+  ledG.setTransform(DPR,0,0,DPR,0,0); ledG.clearRect(0,0,W,H);
+  const r1=Math.min(H*0.30,W*0.21), r2=r1*0.52, cy=H*0.44, x1=W*0.34, x2=W*0.8;
+  const room=cx=>Math.min(cy-2,H-cy-2,cx-2,W-cx-2);
+  drawLed(ledG,x1,cy,r1,{c:o1.c,b:o1.b*m,room:room(x1)}); drawLed(ledG,x2,cy,r2,{c:o2.c,b:o2.b*m,room:room(x2)});
+  ledG.fillStyle=TH.muted; ledG.font='500 11px "IBM Plex Mono",ui-monospace,monospace'; ledG.textAlign='center';
+  ledG.fillText('TIMER',x1,cy+r1*1.17+22); ledG.fillText(cfg.trackRepeats?'REPEAT':'SET',x2,cy+r2*1.17+22);
+}
+
+let mapCache=null,mapKey='';
+function buildMap(W,H){
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d');
+  const gap=Math.max(1,Math.round((PLAN.wins.length>60?1:2)*DPR));
+  PLAN.wins.forEach(w=>{
+    const {impl,prof}=implFor(cfg,w.type);
+    const x0=Math.round(w.start/PLAN.total*W), x1=Math.round((w.start+w.len)/PLAN.total*W)-gap;
+    const n=Math.max(1,x1-x0);   /* narrow windows (many repeats) keep at least one pixel */
+    for(let x=x0;x<Math.max(x1,x0+1);x++){ g.fillStyle=rgbCss(shade(impl.colorAt(prof,(x-x0+0.5)/n,w.len))); g.fillRect(x,0,1,H); }
+  });
+  return c;
+}
+function drawMap(){
+  fit(mapCv); const W=mapCv.width,H=mapCv.height; const key=CFG_VER+'|'+W+'|'+H;
+  if(key!==mapKey){ mapCache=buildMap(W,H); mapKey=key; }
+  mapG.setTransform(1,0,0,1,0,0); mapG.clearRect(0,0,W,H); mapG.drawImage(mapCache,0,0);
+  const px=S.t/PLAN.total*W;
+  mapG.fillStyle=`rgba(${TH.bg.join(',')},0.66)`; mapG.fillRect(px,0,W-px,H);
+  mapG.fillStyle=TH.ink; mapG.fillRect(px-DPR,0,2*DPR,H);
+}
+
+/* light output of one whole window, columns colored by the window color and sized by brightness */
+function buildWave(win,W,H,axis){
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d');
+  const {impl,prof}=implFor(cfg,win.type), K=impl.segments(prof);
+  const pad=axis?Math.round(16*DPR):Math.round(4*DPR), base=H-pad, top=Math.round(5*DPR), plotH=base-top, N=4;
+  for(let x=0;x<W;x++){
+    let sum=0; for(let s=0;s<N;s++) sum+=led1(cfg,win,((x+(s+0.5)/N)/W)*win.len).b;
+    const mid=led1(cfg,win,((x+0.5)/W)*win.len), h=Math.max(1,(sum/N)*plotH);
+    g.fillStyle=rgbCss(shade(mid.c)); g.fillRect(x,base-h,1,h);
+  }
+  g.fillStyle=TH.line; g.fillRect(0,base,W,Math.max(1,DPR));
+  g.strokeStyle=TH.light?'rgba(0,0,0,0.3)':'rgba(255,255,255,0.28)'; g.lineWidth=Math.max(1,DPR); g.setLineDash([4*DPR,4*DPR]);
+  const cuts=[];                                                      /* where the color changes */
+  if(impl===PULSE&&win.len>prof.final){                                /* long load: K shares before the final stretch, then K more inside it */
+    const F=prof.final, head=win.len-F;
+    for(let i=1;i<K;i++) cuts.push(i/K*head/win.len);
+    cuts.push(head/win.len);
+    for(let i=1;i<K;i++) cuts.push((head+i/K*F)/win.len);
+  }else for(let i=1;i<K;i++) cuts.push(i/K);
+  for(const f of cuts){ const x=Math.round(f*W); g.beginPath(); g.moveTo(x,top); g.lineTo(x,base); g.stroke(); }
+  g.setLineDash([]);
+  if(axis){
+    g.fillStyle=TH.muted; g.font=`400 ${Math.round(10*DPR)}px "IBM Plex Mono",ui-monospace,monospace`;
+    g.textAlign='left'; g.fillText('0 s',2*DPR,H-4*DPR); g.textAlign='right'; g.fillText(fmtN(win.len)+' s',W-2*DPR,H-4*DPR);
+  }
+  return c;
+}
+/* Whole-session scope: light output of every window end to end, so the playhead is total elapsed over total time.
+   Columns hold the brightest value in their slice of time (pulses faster than a column read as solid). */
+function buildSession(W,H){
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d');
+  const pad=Math.round(16*DPR), base=H-pad, top=Math.round(5*DPR), plotH=base-top, N=6, T=PLAN.total;
+  for(let x=0;x<W;x++){
+    let mx=-1, col=null;
+    for(let s=0;s<N;s++){
+      const t=Math.min(T-1e-6,((x+(s+0.5)/N)/W)*T), l=locate(PLAN.wins,T,t), o=led1(cfg,l.win,l.local);
+      if(o.b>mx){ mx=o.b; col=o.c; }
+    }
+    const h=Math.max(1,mx*plotH); g.fillStyle=rgbCss(shade(col)); g.fillRect(x,base-h,1,h);
+  }
+  g.fillStyle=TH.line; g.fillRect(0,base,W,Math.max(1,DPR));
+  g.strokeStyle=TH.light?'rgba(0,0,0,0.3)':'rgba(255,255,255,0.28)'; g.lineWidth=Math.max(1,DPR); g.setLineDash([4*DPR,4*DPR]);
+  PLAN.wins.forEach(w=>{ if(w.type!=='load'||w.start<=0) return; const x=Math.round(w.start/T*W); g.beginPath(); g.moveTo(x,top); g.lineTo(x,base); g.stroke(); });   /* set boundaries */
+  g.setLineDash([]);
+  g.fillStyle=TH.muted; g.font=`400 ${Math.round(10*DPR)}px "IBM Plex Mono",ui-monospace,monospace`;
+  g.textAlign='left'; g.fillText('0:00',2*DPR,H-4*DPR); g.textAlign='right'; g.fillText(fmtDur(T),W-2*DPR,H-4*DPR);
+  return c;
+}
+let scopeMode='session';
+try{ if(localStorage.getItem('interval-beacon-scope')==='window') scopeMode='window'; }catch(e){}
+let wfCache=null,wfKey='';
+function drawWave(loc){
+  fit(wfCv); const W=wfCv.width,H=wfCv.height, ses=scopeMode==='session';
+  const key=CFG_VER+'|'+(ses?'s':loc.idx)+'|'+W+'|'+H;
+  if(key!==wfKey){ wfCache=ses?buildSession(W,H):buildWave(loc.win,W,H,true); wfKey=key; }
+  wfG.setTransform(1,0,0,1,0,0); wfG.clearRect(0,0,W,H); wfG.drawImage(wfCache,0,0);
+  const px=clamp(ses?S.t/PLAN.total:loc.p,0,1)*W, base=H-Math.round(16*DPR);
+  wfG.fillStyle=`rgba(${TH.bg.join(',')},0.62)`; wfG.fillRect(px,0,W-px,base);
+  wfG.fillStyle=TH.ink; wfG.fillRect(px-DPR,0,2*DPR,base);
+}
+const scopeBtn=$('#scopeBtn');
+function syncScope(){
+  const ses=scopeMode==='session';
+  scopeBtn.textContent=ses?'All':'Now';
+  scopeBtn.setAttribute('aria-label',ses?'Scope shows the whole session. Switch to the current window':'Scope shows the current window. Switch to the whole session');
+}
+scopeBtn.addEventListener('click',()=>{
+  scopeMode=scopeMode==='session'?'window':'session';
+  try{ localStorage.setItem('interval-beacon-scope',scopeMode); }catch(e){}
+  wfKey=''; syncScope();
+});
+syncScope();
+
+/* ============ per-frame render ============ */
+function setText(el,v){ if(el._v!==v){ el._v=v; el.textContent=v; } }
+const elDot=$('#phaseDot'), elPhase=$('#phaseName'), elSet=$('#setLine'), elOf=$('#ofLen'),
+      rMain=$('#rMain'), rTenth=$('#rTenth'),
+      elElapsed=$('#elapsed'), elPct=$('#pct'), elTotal=$('#totalT'), barFill=$('#barFill'), barWrap=$('.bar2');
+/* Plain stopwatch digits, redrawn on every animation frame (the display refresh rate), so a new tenth appears the moment it changes. */
+function setRemain(rem){
+  const T=Math.ceil(Math.max(0,rem)*10-1e-9), sec=Math.floor(T/10);
+  setText(rMain,fmtDur(sec)); setText(rTenth,'.'+(T%10));
+}
+const timerScreen=$('#screenTimer');
+
+function render(now){
+  const nowS=now/1000, total=PLAN.total;
+  const loc=locate(PLAN.wins,total,Math.min(S.t,total));
+  const win=loc.win;
+  let o1,o2;
+  switch(S.state){
+    case 'idle':{
+      const br=0.14+0.1*Math.sin(nowS*TAU*0.3);
+      const first=implFor(cfg,PLAN.wins[0].type);
+      o1={c:first.impl.first(first.prof),b:br}; o2={c:[226,236,255],b:br*0.8}; break;
+    }
+    case 'run': o1=led1(cfg,win,loc.local); o2=led2(cfg,win); break;
+    case 'pause':{
+      const base=led1(cfg,win,loc.local);
+      o1={c:base.c,b:0.45}; o2={c:[255,170,0],b:(nowS%1.2)<0.6?0.9:0.06}; break;
+    }
+    case 'preview':{
+      const span=Math.max(0.0001,Math.min(win.len-loc.local,2.5));
+      const lt=loc.local+((nowS%2.5)/2.5)*span;
+      o1=led1(cfg,win,lt); o2=led2(cfg,win); break;
+    }
+    case 'stopped': o1={c:[255,255,255],b:0}; o2={c:[255,255,255],b:0}; break;
+    default:
+      o1={c:hslToRgb((nowS*0.12)%1,1,0.55),b:0.9}; o2={c:[255,255,255],b:0.6+0.3*Math.sin(nowS*TAU*0.4)};
+  }
+
+  const quiet=S.state==='idle'||S.state==='stopped';
+  const dotCss=quiet?'#3a4650':rgbCss(o1.c);
+  if(elDot._c!==dotCss){ elDot._c=dotCss; elDot.style.background=dotCss; barFill.style.background=quiet?'':dotCss; }
+  setText(elPhase,S.state==='idle'?'Ready':S.state==='done'?'Done':S.state==='stopped'?'Stopped':winName(cfg,win));
+  const nx=nextOf(cfg,win), upcoming=win.type==='trans'||win.type==='lead';
+  setText(elSet,S.state==='done'?'✓':`${cfg.repeat>1?`↻ ${nx.rep} / ${cfg.repeat}\n`:''}${upcoming?'→ ':''}${nx.set} / ${cfg.sets}`);
+  const rem=S.state==='idle'?win.len:S.state==='done'?0:win.len-loc.local;
+  setRemain(rem);
+  setText(elOf,`${winName(cfg,win)} ${fmtDur(win.len)}`);
+
+  const frac=clamp(S.t/total,0,1), pct=Math.floor(frac*100);
+  setText(elElapsed,fmtDur(Math.floor(S.t))); setText(elPct,pct+'%'); setText(elTotal,fmtDur(total));
+  const w=(frac*100).toFixed(2)+'%'; if(barFill._w!==w){ barFill._w=w; barFill.style.width=w; barWrap.setAttribute('aria-valuenow',pct); }
+  const sec=Math.floor(S.t); if(mapCv._s!==sec){ mapCv._s=sec; mapCv.setAttribute('aria-valuenow',sec); }
+
+  if(!timerScreen.hidden){ drawStage(o1,o2); drawMap(); drawWave(loc); }
+}
+let lastNow=0;
+function frame(now){
+  const dt=lastNow?(now-lastNow)/1000:0; lastNow=now;
+  if(S.state==='run'){
+    S.t+=Math.max(0,dt);
+    if(S.t>=PLAN.total){ S.t=PLAN.total; S.state='done'; releaseWake(); updateButtons(); }
+  }
+  render(now);
+  requestAnimationFrame(frame);
+}
+
+/* ============ transport and timer screen ============ */
+goBtn.addEventListener('click',()=>{ S.state==='run'?doPause():doStart(); });
+stopBtn.addEventListener('click',doStop);
+resetBtn.addEventListener('click',doReset);
+
+let scrubbing=false;
+function scrubTo(e){ const r=mapCv.getBoundingClientRect(); seek(clamp((e.clientX-r.left)/r.width,0,0.99999)*PLAN.total); }
+mapCv.addEventListener('pointerdown',e=>{ scrubbing=true; try{ mapCv.setPointerCapture(e.pointerId); }catch(_){} scrubTo(e); });
+mapCv.addEventListener('pointermove',e=>{ if(scrubbing) scrubTo(e); });
+const endScrub=()=>{ scrubbing=false; };
+mapCv.addEventListener('pointerup',endScrub); mapCv.addEventListener('pointercancel',endScrub);
+mapCv.addEventListener('keydown',e=>{
+  const step=e.shiftKey?10:1; let t=null;
+  if(e.key==='ArrowRight') t=S.t+step; else if(e.key==='ArrowLeft') t=S.t-step;
+  else if(e.key==='Home') t=0; else if(e.key==='End') t=PLAN.total;
+  if(t!==null){ e.preventDefault(); seek(t); }
+});
+
+const inst=$('#inst'), fsBtn=$('#fsBtn'), app=$('#app');
+if(!document.fullscreenEnabled) fsBtn.hidden=true;
+fsBtn.addEventListener('click',()=>{ try{ if(document.fullscreenElement) document.exitFullscreen(); else inst.requestFullscreen().catch(()=>{}); }catch(e){} });
+
+function applyBlind(){
+  app.classList.toggle('blind',cfg.blind); $('#blindNote').hidden=!cfg.blind;
+  $('#blindBtn').setAttribute('aria-pressed',cfg.blind); $('#blindIc').innerHTML=`<use href="#i-${cfg.blind?'eyeoff':'eye'}"/>`;
+}
+$('#blindBtn').addEventListener('click',()=>{ cfg.blind=!cfg.blind; applyBlind(); scheduleSave(); });
+
+/* tabs */
+function showTab(which){
+  const t=which==='timer';
+  $('#screenTimer').hidden=!t; $('#screenSet').hidden=t;
+  $('#tabT').setAttribute('aria-selected',t); $('#tabS').setAttribute('aria-selected',!t);
+  $('#screens').scrollTop=0;
+  if(!t) schedulePreviews();
+}
+$('#tabT').addEventListener('click',()=>showTab('timer'));
+$('#tabS').addEventListener('click',()=>showTab('set'));
+
+/* ============ settings: shared pieces ============ */
+let uid=0;
+function rangeRow(label,min,max,step,unit,get,set,off){
+  const row=el('div','rr'), id='rg'+(++uid);
+  const lab=el('label'); lab.htmlFor=id; lab.textContent=label;
+  const inp=el('input'); inp.type='range'; inp.id=id; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
+  const show=v=>(off&&v===0)?off:v+unit;
+  const out=el('output'); out.textContent=show(get());
+  inp.addEventListener('input',()=>{ const v=Number(inp.value); set(v); out.textContent=show(v); });
+  row.append(lab,inp,out); return row;
+}
+function switchEl(checked,onChange,label){
+  const sw=el('label','sw'); const inp=el('input'); inp.type='checkbox'; inp.setAttribute('role','switch'); inp.checked=checked; inp.setAttribute('aria-label',label);
+  inp.addEventListener('change',()=>onChange(inp.checked)); sw.append(inp,el('i')); return sw;
+}
+
+/* previews and summaries */
+let pvQueued=false;
+function schedulePreviews(){ if(pvQueued) return; pvQueued=true; requestAnimationFrame(()=>{ pvQueued=false; drawPreviews(); }); }
+function drawPreviews(){
+  for(const key of ['load','trans','lead']){
+    const det=$('#sec-'+key), cv=$('#pv-'+key);
+    if(!det||!cv||!det.open||det.hidden||$('#screenSet').hidden) continue;
+    const len=key==='load'?cfg.loadSec:key==='lead'?cfg.leadSec:cfg.transSec;
+    if(cv.getBoundingClientRect().width<2) continue;
+    fit(cv); const g=cv.getContext('2d'); g.setTransform(1,0,0,1,0,0); g.clearRect(0,0,cv.width,cv.height);
+    if(len>0) g.drawImage(buildWave({type:key==='load'?'load':key,set:1,len},cv.width,cv.height,false),0,0);
+  }
+}
+function updateSummaries(){
+  $('#sum-timing').textContent=`${cfg.loadSec>=60?fmtDur(cfg.loadSec):cfg.loadSec+'s'} · ${cfg.transSec}s · ${cfg.sets}×${cfg.repeat}`;
+  $('#sum-names').textContent=`${cfg.names.load||'Load'} · ${cfg.names.trans||'Transition'}`;
+  setText($('#stLoad'),cfg.names.load||'Load'); setText($('#stTrans'),cfg.names.trans||'Transition'); setText($('#stLead'),cfg.names.lead||'Lead-in');
+  for(const k of ['load','trans','lead']) $('#gr-'+k).style.background=`linear-gradient(90deg,${cfg.profiles[k].colors.join(',')})`;
+  $('#sum-led').textContent=`${cfg.master}%`;
+  $('#sum-dev').textContent=devSummary();
+}
+let presetPT=0;
+function touch(){ CFG_VER++; scheduleSave(); schedulePreviews(); updateSummaries(); clearTimeout(presetPT); presetPT=setTimeout(()=>{ if(!P.editing) renderPresets(); },250); }   /* keeps the "changed" tag on the active saved timer current */
+document.querySelectorAll('#screenSet details').forEach(d=>d.addEventListener('toggle',schedulePreviews));
+
+/* ============ settings: timing ============ */
+const ROWS=[
+  {id:'loadSec',label:'Load',icon:'pulse',type:'step',min:3,max:1200,step:5,unit:'s',dyn:true,hint:true},
+  {id:'transSec',label:'Transition',icon:'wave',type:'step',min:0,max:600,step:5,unit:'s'},
+  {id:'sets',label:'Sets',icon:'repeat',type:'step',min:1,max:20,step:1,unit:'',int:true},
+  {id:'repeat',label:'Repeat',icon:'loop',type:'step',min:1,max:20,step:1,unit:'×',int:true},
+  {id:'trackRepeats',label:'Set LED',icon:'dot',type:'seg',opts:[[false,'Sets'],[true,'Repeats']]},
+  {id:'redHold',label:'Hold',icon:'dot',iconCls:'red',type:'step',min:0,max:10,step:0.5,unit:'s'},
+  {id:'lead',label:'Lead-in',icon:'flag',type:'switch'},
+  {id:'leadSame',label:'Same as transition',icon:'link',type:'switch',when:()=>cfg.lead},
+  {id:'leadSec',label:'Lead-in length',icon:'flag',type:'step',min:1,max:600,step:5,unit:'s',when:()=>cfg.lead&&!cfg.leadSame},
+  {id:'finalTrans',label:'Final transition',icon:'wave',type:'switch',get:()=>!cfg.skipFinal,set:v=>{ cfg.skipFinal=!v; }}
+];
+const timingCtl={};
+/* which color LED 2 follows changes nothing about the timing, so it must not reset a running timer */
+function commitTrack(){ SET_COLORS=setColors(trackN(cfg)); renderLegend(); touch(); }
+function commitTiming(){
+  PLAN=buildWindows(cfg); SET_COLORS=setColors(trackN(cfg));
+  updateTotals(); renderLegend(); renderSetNames(); syncTiming(); doReset(); touch();
+}
+function buildTiming(){
+  const box=$('#timingBox'); box.textContent='';
+  for(const r of ROWS){
+    const row=el('div','srow'); row.id='row-'+r.id;
+    row.append(el('span','sl',`${ICON(r.icon,r.iconCls)}<span>${r.label}${r.hint?'<small class="hint"></small>':''}</span>`));
+    if(r.type==='step'){
+      const wrap=el('div','step'), minus=el('button','sb',ICON('minus')), plus=el('button','sb',ICON('plus')), inp=el('input');
+      minus.type=plus.type='button'; minus.setAttribute('aria-label',r.label+' less'); plus.setAttribute('aria-label',r.label+' more');
+      inp.type='number'; inp.inputMode='decimal'; inp.min=r.min; inp.max=r.max; inp.step=r.step; inp.setAttribute('aria-label',r.label);
+      const apply=v=>{ if(!isFinite(v)){ inp.value=cfg[r.id]; return; } v=clamp(v,r.min,r.max); v=r.int?Math.round(v):Math.round(v*2)/2; cfg[r.id]=v; inp.value=v; commitTiming(); };
+      const dyn=v=>v>=300?30:v>=120?15:5;     /* long windows step in bigger jumps; type a value for anything exact */
+      minus.addEventListener('click',()=>apply(cfg[r.id]-(r.dyn?dyn(cfg[r.id]-1):r.step))); plus.addEventListener('click',()=>apply(cfg[r.id]+(r.dyn?dyn(cfg[r.id]):r.step)));
+      inp.addEventListener('change',()=>apply(parseFloat(inp.value)));
+      wrap.append(minus,inp,plus,el('span','unit',r.unit)); row.append(wrap); timingCtl[r.id]={inp};
+    }else if(r.type==='seg'){
+      const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',r.label); seg.style.maxWidth='190px';
+      const btns=r.opts.map(([v,t])=>{ const b=el('button',null,t); b.type='button'; b.addEventListener('click',()=>{ cfg[r.id]=v; syncTiming(); commitTrack(); }); seg.append(b); return [v,b]; });
+      row.append(seg); timingCtl[r.id]={seg:btns};
+    }else{
+      const get=r.get||(()=>cfg[r.id]), set=r.set||(v=>{ cfg[r.id]=v; });
+      const sw=switchEl(get(),v=>{ set(v); commitTiming(); },r.label); row.append(sw); timingCtl[r.id]={sw:sw.firstChild,get};
+    }
+    box.append(row);
+  }
+}
+function syncTiming(){
+  for(const r of ROWS){
+    const c=timingCtl[r.id];
+    if(c.inp) c.inp.value=cfg[r.id]; else if(c.seg) c.seg.forEach(([v,b])=>b.setAttribute('aria-pressed',cfg[r.id]===v)); else c.sw.checked=c.get();
+    if(r.hint){ const h=$('#row-'+r.id+' .hint'); h.textContent=cfg[r.id]>=60?fmtDur(cfg[r.id]):''; }
+    $('#row-'+r.id).hidden=r.when?!r.when():false;
+  }
+  $('#sec-lead').hidden=!(cfg.lead&&!cfg.leadSame);
+}
+function updateTotals(){
+  $('#totalT').textContent=fmtDur(PLAN.total);
+  mapCv.setAttribute('aria-valuemax',Math.round(PLAN.total));
+}
+function renderLegend(){
+  const box=$('#chips'); box.textContent='';
+  SET_COLORS.forEach((c,i)=>{
+    const d=el('span','chip',String(i+1)); d.style.background=rgbCss(c);
+    const lum=0.2126*c[0]+0.7152*c[1]+0.0722*c[2]; d.style.color=lum>130?'#000':'#fff'; d.title=(cfg.trackRepeats?'Repeat ':'Set ')+(i+1); box.append(d);
+  });
+}
+
+/* ============ settings: names ============ */
+const NAME_ROWS=[['load','Load','pulse'],['trans','Transition','wave'],['lead','Lead-in','flag'],['hold','Hold','dot']];
+function buildNames(){
+  const box=$('#namesBox'); box.textContent='';
+  for(const [k,def,icon] of NAME_ROWS){
+    const row=el('div','srow'); row.append(el('span','sl',ICON(icon,k==='hold'?'red':'')));
+    const inp=el('input','txt'); inp.type='text'; inp.maxLength=24; inp.placeholder=def; inp.value=cfg.names[k]; inp.setAttribute('aria-label',def+' name'); inp.id='nm-'+k;
+    inp.addEventListener('input',()=>{ cfg.names[k]=inp.value; refreshNamePlaceholders(); touch(); });
+    row.append(inp); row.style.gap='10px'; box.append(row);
+  }
+}
+function refreshNamePlaceholders(){
+  document.querySelectorAll('#setNames input[data-kind]').forEach(i=>{ i.placeholder=cfg.names[i.dataset.kind]||(i.dataset.kind==='load'?'Load':'Transition'); });
+}
+function renderSetNames(){
+  const box=$('#setNames'); box.textContent='';
+  for(let s=1;s<=cfg.sets;s++){
+    const row=el('div','nrow'); row.append(el('span','n',String(s)));
+    for(const [kind,store] of [['load','loadNames'],['trans','transNames']]){
+      const inp=el('input','txt'); inp.type='text'; inp.maxLength=24; inp.dataset.kind=kind; inp.value=cfg[store][s]||''; inp.setAttribute('aria-label',`Set ${s} ${kind==='load'?'load':'transition'} name`);
+      if(kind==='trans'&&s===cfg.sets&&cfg.skipFinal&&cfg.repeat===1) inp.disabled=true;   /* with repeats the last set's transition leads into the next repeat */
+      inp.addEventListener('input',()=>{ const v=inp.value.slice(0,24); if(v) cfg[store][s]=v; else delete cfg[store][s]; touch(); });
+      row.append(inp);
+    }
+    box.append(row);
+  }
+  refreshNamePlaceholders();
+}
+
+/* ============ settings: window editors ============ */
+function renderEditor(key){
+  const box=$('#ed-'+key); box.textContent='';
+  const impl=key==='load'?PULSE:TRANS, prof=cfg.profiles[key];
+  const pv=el('canvas','pv'); pv.id='pv-'+key; pv.setAttribute('aria-label','Light output preview'); box.append(pv);
+  for(const it of impl.schema){
+    if(it.g){ box.append(el('div','gh',it.g)); continue; }
+    if(it.when&&!it.when(prof)) continue;
+    if(it.choice){
+      const row=el('div','rr'); row.append(el('label',null,it.l));
+      const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',it.l);
+      for(const [v,t] of it.choice){
+        const b=el('button',null,t); b.type='button'; b.setAttribute('aria-pressed',prof[it.k]===v);
+        b.addEventListener('click',()=>{ prof[it.k]=v; seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b)); touch(); if(it.redo) renderEditor(key); });
+        seg.append(b);
+      }
+      row.append(seg); box.append(row);
+    }else box.append(rangeRow(it.l,it.min,it.max,it.step,it.u,()=>prof[it.k],v=>{ prof[it.k]=v; touch(); },it.off));
+  }
+  box.append(el('div','gh','Colors'));
+  const stops=el('div','stops'); box.append(stops); renderStops(key,stops);
+  const rb=el('button','rbtn',`${ICON('reset')}<span>Defaults</span>`); rb.type='button';
+  rb.addEventListener('click',()=>{ cfg.profiles[key]=defaults().profiles[key]; renderEditor(key); touch(); });
+  box.append(rb);
+}
+function renderStops(key,box){
+  const prof=cfg.profiles[key]; box.textContent=''; const K=prof.colors.length;
+  prof.colors.forEach((hex,i)=>{
+    const inp=el('input'); inp.type='color'; inp.value=hex; inp.setAttribute('aria-label',`Color ${i+1} of ${K}`);
+    inp.addEventListener('input',()=>{ prof.colors[i]=inp.value; touch(); }); box.append(inp);
+  });
+  const add=el('button','ibtn',ICON('plus')), rem=el('button','ibtn',ICON('minus'));
+  add.type=rem.type='button'; add.disabled=K>=5; rem.disabled=K<=2; add.setAttribute('aria-label','Add color'); rem.setAttribute('aria-label','Remove color');
+  add.addEventListener('click',()=>{ prof.colors.push(prof.colors[prof.colors.length-1]); renderStops(key,box); touch(); });
+  rem.addEventListener('click',()=>{ prof.colors.pop(); renderStops(key,box); touch(); });
+  box.append(add,rem);
+}
+
+/* ============ settings: LEDs ============ */
+function buildLedBox(){
+  const box=$('#ledBox'); [...box.children].forEach(n=>{ if(n.id!=='chips') n.remove(); });
+  box.append(
+    rangeRow('Bright',10,100,5,'%',()=>cfg.master,v=>{ cfg.master=v; touch(); }),
+    rangeRow('Flash',0,1000,50,' ms',()=>cfg.holdMs,v=>{ cfg.holdMs=v; touch(); }),
+    rangeRow('Max Hz',1,8,0.5,' Hz',()=>cfg.maxHz,v=>{ cfg.maxHz=v; touch(); }),
+    el('p','note','Flashing faster than about 3 Hz can affect people with photosensitive epilepsy.')
+  );
+}
+
+/* ============ settings: device ============ */
+const PIN_SETS=[['timer','Timer','pulse'],['set','Set','repeat']];
+const PIN_CH=[['r','R'],['g','G'],['b','B'],['com','']];
+function pinConflicts(){
+  const seen={}, bad=new Set();
+  for(const [k] of PIN_SETS) for(const [ch] of PIN_CH){ const n=cfg.pins[k][ch]; if(n<0) continue; const id=k+ch; if(seen[n]){ bad.add(id); bad.add(seen[n]); } else seen[n]=id; }
+  return bad.size?bad:null;
+}
+function refreshPins(){
+  const bad=pinConflicts();
+  document.querySelectorAll('#pinsBox .pin').forEach(p=>p.classList.toggle('bad',!!bad&&bad.has(p.dataset.id)));
+  $('#pinWarn').hidden=!bad; $('#sum-dev').textContent=devSummary();
+}
+function buildPins(){
+  const box=$('#pinsBox'); box.textContent='';
+  for(const [k,label,icon] of PIN_SETS){
+    const card=el('div','pcard'); card.append(el('div','ph',`${ICON(icon)}<span>${label}</span>`));
+    const grid=el('div','pgrid'), tags={};
+    for(const [ch,txt] of PIN_CH){
+      const f=el('label','pin'); f.dataset.id=k+ch;
+      const tag=el('span','pl pl-'+(ch==='com'?'c':ch),ch==='com'?(cfg.pins[k].anode?'+':'−'):txt); tags[ch]=tag; f.append(tag);
+      const sel=el('select'); sel.setAttribute('aria-label',`${label} ${ch==='com'?'common':ch.toUpperCase()} pin`);
+      if(ch==='com'){ const o=el('option',null,'—'); o.value=-1; sel.append(o); }
+      for(const n of PIN_CHOICES){ const o=el('option',null,String(n)); o.value=n; sel.append(o); }
+      sel.value=cfg.pins[k][ch];
+      sel.addEventListener('change',()=>{ cfg.pins[k][ch]=Number(sel.value); refreshPins(); scheduleSave(); });
+      f.append(sel); grid.append(f);
+    }
+    card.append(grid);
+    const row=el('div','srow'); row.append(el('span','sl','<span>Common anode</span>'));
+    row.append(switchEl(cfg.pins[k].anode,v=>{ cfg.pins[k].anode=v; tags.com.textContent=v?'+':'−'; scheduleSave(); },label+' common anode'));
+    card.append(row); box.append(card);
+  }
+  refreshPins();
+}
+
+/* ============ device link ============ */
+/* On the device's own page (http, soft AP or home Wi-Fi) this talks to the sketch: it polls the timer state, pushes
+   settings and sends commands. Anywhere else nothing answers, so the timer on this page stands alone. */
+const DEV={on:false,rev:-1,seq:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function api(path,opt){
+  opt=Object.assign({},opt||{});
+  const ms=opt.timeout||(DEV.asleep?8000:3000); delete opt.timeout;
+  const c=new AbortController(), t=setTimeout(()=>c.abort(),ms);
+  return fetch(path,Object.assign({signal:c.signal,cache:'no-store'},opt))
+    .then(r=>{ if(!r.ok) throw new Error(String(r.status)); return r.json(); }).finally(()=>clearTimeout(t));
+}
+function linkLabel(){
+  if(!DEV.on) return '192.168.4.1';
+  if(DEV.asleep) return 'Asleep';
+  if(DEV.net==='sta') return location.host;
+  return DEV.fail?'AP fallback':'192.168.4.1';
+}
+function setLink(ok,text){
+  $('#linkDot').classList.toggle('busy',!ok);
+  const label=text||linkLabel();
+  $('#linkTxt').textContent=label;
+  const wake=!!(DEV.on&&DEV.asleep&&label==='Asleep');
+  const chip=$('#linkChip');
+  chip.classList.toggle('wake',wake);
+  if(wake){ chip.setAttribute('role','button'); chip.setAttribute('aria-label','Wake the timer'); }
+  else{ chip.removeAttribute('role'); chip.removeAttribute('aria-label'); }
+}
+function devNote(j){
+  if(!j) return;
+  DEV.asleep=!!j.sleep; if(j.net) DEV.net=j.net; DEV.fail=!!j.fail;
+}
+const STATES=['idle','run','pause','preview','done','stopped'];
+function devApplyState(j,rtt){
+  devNote(j);
+  if(DEV.on&&!DEV.rebooting) setLink(!DEV.asleep);
+  if(j) renderNet();
+  if(!j||scrubbing||DEV.seekT) return;
+  const st=STATES.includes(j.s)?j.s:'idle', tt=Number(j.t)+(st==='run'?(rtt||0)/2000:0);
+  if(st!==S.state){ S.state=st; S.t=tt; if(st==='run') acquireWake(); else releaseWake(); updateButtons(); }
+  else{ const d=tt-S.t; if(Math.abs(d)>0.25||st!=='run') S.t=tt; else S.t+=d*0.3; }   /* nudge, don't jump, while running */
+}
+function devCmd(c,t){
+  if(!DEV.on) return;
+  DEV.seq++;
+  api('/api/cmd?c='+c+(t!=null?'&t='+t.toFixed(3):''),{method:'POST'}).then(j=>{ DEV.seq++; devApplyState(j,0); }).catch(()=>{});
+}
+function devSeek(t){
+  if(!DEV.on) return; DEV.seekV=t;
+  if(!DEV.seekT) DEV.seekT=setTimeout(()=>{ DEV.seekT=0; devCmd('seek',DEV.seekV); },90);
+}
+function devPush(){
+  if(!DEV.on) return;
+  DEV.pending=true; clearTimeout(DEV.pushT);
+  DEV.pushT=setTimeout(async()=>{
+    DEV.pushT=0; DEV.inflight++;
+    try{ const j=await api('/api/config',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(cfg)}); if(j&&typeof j.rev==='number') DEV.rev=j.rev; }catch(e){}
+    DEV.inflight--; DEV.pending=!!(DEV.pushT||DEV.inflight);
+  },350);
+}
+async function devPoll(){
+  if(!DEV.on) return;
+  if(!DEV.rebooting){
+    const seq=DEV.seq, t0=performance.now();
+    try{
+      const j=await api('/api/state'), rtt=performance.now()-t0;
+      if(DEV.fails>=3) setLink(true);
+      DEV.fails=0;
+      if(seq===DEV.seq) devApplyState(j,rtt);
+      if(j.rev!==DEV.rev&&!DEV.pending){ DEV.rev=j.rev; applyRemoteConfig(await api('/api/config')); }
+    }catch(e){ if(++DEV.fails===3) setLink(false,'Offline'); }
+  }
+  setTimeout(devPoll,DEV.fails?1500:(DEV.asleep?4000:300));
+}
+async function devProbe(){
+  if(location.protocol!=='http:') return;
+  try{
+    const j=await api('/api/state');
+    if(!j||j.app!=='beacon') return;
+    DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
+    applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
+    setLink(true); presetsLoad(); upLoad(); netLoad(); devPoll();
+  }catch(e){}
+}
+async function waitDevice(tries=45,label='Rebooting'){
+  DEV.rebooting=true; setLink(false,label); await sleep(2500);
+  for(let i=0;i<tries;i++){
+    try{ const j=await api('/api/state'); if(j&&j.app==='beacon'){ DEV.rebooting=false; DEV.fails=0; setLink(true); DEV.rev=j.rev; $('#fwVer').textContent='v'+(j.ver||'?'); devApplyState(j,0); return true; } }catch(e){}
+    await sleep(800);
+  }
+  DEV.rebooting=false; setLink(false,'Offline'); return false;
+}
+
+/* ============ home network / sleep ============ */
+/* The switch picks the mode. Reboot applies it. Credentials are the Online update fields (wSsid / wPass on the board). */
+const NET={info:null,hold:false,arm:0,key:''};
+const netSta=$('#netSta'), netNote=$('#netNote'), netStat=$('#netStat'), netGo=$('#netGo'), netGoTxt=$('#netGoTxt'), sleepBtn=$('#sleepBtn'), wakeBtn=$('#wakeBtn');
+function devSummary(){
+  if(pinConflicts()) return '⚠';
+  if(!DEV.on||!NET.info) return '';
+  if(NET.info.radio==='sta') return DEV.asleep?'asleep':'home Wi-Fi';
+  if(NET.info.fail) return 'AP fallback';
+  return '';
+}
+function netMsg(t,bad){ netNote.textContent=t||''; netNote.style.color=bad?'var(--bad)':''; }
+function netSsid(){ return (upSsid.value.trim()||(NET.info&&NET.info.ssid)||''); }
+function renderNet(){
+  const i=NET.info, on=DEV.on&&!!i;
+  const sta=on&&i.radio==='sta';
+  sleepBtn.hidden=!sta||DEV.asleep;
+  wakeBtn.hidden=!sta||!DEV.asleep;
+  netGo.hidden=!NET.hold;
+  netSta.disabled=!on;
+  netStat.textContent=on?(sta?(DEV.asleep?'asleep':i.ip):(i.fail?'fallback':i.ip)):'';
+  if(!NET.hold) netSta.checked=on&&i.wanted==='sta';
+  const key=!on?'off':[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0].join('|');
+  if(key===NET.key) { $('#sum-dev').textContent=devSummary(); return; }
+  NET.key=key;
+  if(!on) netMsg('Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
+  else if(NET.hold){ /* the switch handler wrote the reboot instructions */ }
+  else if(i.fail) netMsg('Could not join “'+(i.ssid||'the saved network')+'”. This boot is the Beacon-timer access point. Check the name and password below. The next boot tries again unless Home Wi-Fi is turned off.');
+  else if(sta&&DEV.asleep) netMsg('Asleep. Tap Wake, or Asleep at the top. Starting a session also wakes it. The LEDs sleep again after 5 minutes with nothing running, or when you tap Sleep.');
+  else if(sta) netMsg('On '+((i.ssid)||'home Wi-Fi')+' at '+i.ip+'. Open http://'+i.host+'.local from this network. The LEDs sleep after 5 minutes with no session running. Turn Home Wi-Fi off to reboot into the Beacon-timer access point.');
+  else netMsg('Access point, always awake. The name and password below are the home network. Turn Home Wi-Fi on, then reboot.');
+  $('#sum-dev').textContent=devSummary();
+}
+async function netLoad(){
+  if(!DEV.on){ NET.info=null; NET.key=''; renderNet(); return; }
+  try{ NET.info=await api('/api/net'); NET.key=''; }catch(e){}
+  renderNet();
+}
+netSta.addEventListener('change',()=>{
+  if(!NET.info){ netSta.checked=false; return; }
+  if(S.state==='run'||S.state==='pause'){ netSta.checked=NET.info.wanted==='sta'; netMsg('Stop the timer first.',true); return; }
+  const want=netSta.checked, saved=NET.info.wanted==='sta';
+  if(want===saved){ NET.hold=false; NET.key=''; renderNet(); return; }
+  if(want&&!netSsid()){ netSta.checked=false; NET.hold=false; netMsg('Enter a Wi-Fi name under Online update first. It has to be 2.4 GHz.',true); return; }
+  NET.hold=true; NET.key=''; netGo.hidden=false; netGoTxt.textContent='Reboot';
+  netMsg(want
+    ? 'Reboot to join “'+netSsid()+'”. This phone then has to use that network and open http://beacon-timer.local.'
+    : 'Reboot into the Beacon-timer access point. It stays awake and does not sleep.');
+});
+netGo.addEventListener('click',async()=>{
+  if(!NET.info||!NET.hold) return;
+  if(!NET.arm){ NET.arm=setTimeout(()=>{ NET.arm=0; netGoTxt.textContent='Reboot'; },3500); netGoTxt.textContent='Tap again'; return; }
+  clearTimeout(NET.arm); NET.arm=0; netGoTxt.textContent='Reboot';
+  if(S.state==='run'||S.state==='pause'){ netMsg('Stop the timer first.',true); return; }
+  const mode=netSta.checked?'sta':'ap';
+  const f=new URLSearchParams(); f.set('mode',mode);
+  if(mode==='sta'){ f.set('ssid',netSsid()); if(UP.dirty.pass) f.set('pass',upPass.value); }
+  netSta.disabled=true; netGo.disabled=true; sleepBtn.disabled=true;
+  try{
+    await api('/api/net',{method:'POST',body:f,timeout:8000});
+  }catch(e){
+    netSta.disabled=false; netGo.disabled=false; sleepBtn.disabled=false;
+    netMsg(/409/.test(String(e))?'Stop the timer first.':'Could not change the network.',true); return;
+  }
+  DEV.rebooting=true; S.state='idle'; S.t=0; releaseWake(); updateButtons(); setLink(false,'Rebooting');
+  netMsg(mode==='sta'
+    ? 'Joining “'+netSsid()+'”. On this phone, join that Wi-Fi, then open http://beacon-timer.local.'
+    : 'Starting Beacon-timer. Join that Wi-Fi, then open http://192.168.4.1.');
+});
+async function wakeNow(){
+  try{
+    const j=await api('/api/wake',{method:'POST',timeout:8000});
+    devApplyState(j,0);
+  }catch(e){ setLink(false,'No reply'); }
+}
+sleepBtn.addEventListener('click',async()=>{
+  if(S.state==='run'||S.state==='pause'){ netMsg('Stop the timer first.',true); return; }
+  try{ devApplyState(await api('/api/sleep',{method:'POST',timeout:8000}),0); }
+  catch(e){ netMsg(/409/.test(String(e))?'Stop the timer first.':'Could not reach the timer.',true); }
+});
+wakeBtn.addEventListener('click',wakeNow);
+$('#linkChip').addEventListener('click',()=>{ if(DEV.on&&DEV.asleep) wakeNow(); });
+renderNet();
+
+/* sketch upload and reboot: real on the device, simulated in this preview */
+const FW={file:null,busy:false};
+const fwFile=$('#fwFile'), fwGo=$('#fwGo'), fwBar=$('#fwBar'), fwFill=$('#fwFill'), fwName=$('#fwName'), fwGoTxt=$('#fwGoTxt'), rebootBtn=$('#rebootBtn');
+function markReboot(on){ rebootBtn.classList.toggle('on',on); }
+function fwReset(){ FW.file=null; fwFile.value=''; fwName.textContent='No file'; fwGo.disabled=true; fwBar.hidden=true; fwFill.style.width='0%'; fwFill.style.background=''; fwGoTxt.textContent='Upload'; }
+function xhrUpload(file,onProg){
+  return new Promise((res,rej)=>{
+    const x=new XMLHttpRequest(); x.open('POST','/update');
+    x.upload.onprogress=e=>{ if(e.lengthComputable) onProg(e.loaded/e.total); };
+    x.onload=()=>x.status===200?res():rej(new Error('rejected')); x.onerror=()=>rej(new Error('network'));
+    const fd=new FormData(); fd.append('firmware',file,file.name); x.send(fd);
+  });
+}
+function fakeUpload(onProg){
+  return new Promise(res=>{ const t0=performance.now(); (function tick(now){ const p=clamp((now-t0)/3200,0,1); onProg(p); if(p<1) requestAnimationFrame(tick); else res(); })(t0); });
+}
+$('#fwPick').addEventListener('click',()=>fwFile.click());
+fwFile.addEventListener('change',()=>{
+  const f=fwFile.files&&fwFile.files[0]; FW.file=f||null;
+  fwName.textContent=f?`${f.name} · ${Math.round(f.size/1024)} KB`:'No file';
+  fwGo.disabled=!f||FW.busy; fwBar.hidden=true; fwFill.style.width='0%'; fwFill.style.background=''; fwGoTxt.textContent='Upload';
+});
+fwGo.addEventListener('click',async()=>{
+  if(!FW.file||FW.busy) return;
+  FW.busy=true; fwGo.disabled=true; rebootBtn.disabled=true; fwBar.hidden=false;
+  const prog=p=>{ fwFill.style.width=(p*100).toFixed(1)+'%'; fwGoTxt.textContent=Math.floor(p*100)+'%'; };
+  try{
+    if(DEV.on){ await xhrUpload(FW.file,prog); prog(1); fwGoTxt.textContent='Rebooting'; S.state='idle'; S.t=0; await waitDevice(); }
+    else{ await fakeUpload(prog); markReboot(true); }
+    fwGoTxt.textContent='Done';
+  }catch(e){ fwGoTxt.textContent='Failed'; fwFill.style.background='var(--bad)'; }
+  FW.busy=false; rebootBtn.disabled=false;
+});
+let rebootArm=0;
+rebootBtn.addEventListener('click',async()=>{
+  if(FW.busy) return;
+  const lab=rebootBtn.lastChild;
+  if(!rebootArm){ rebootArm=setTimeout(()=>{ rebootArm=0; lab.textContent='Reboot'; },3000); lab.textContent='Tap again'; return; }   /* confirm() is unavailable, so two taps */
+  clearTimeout(rebootArm); rebootArm=0; lab.textContent='Reboot';
+  rebootBtn.disabled=true; markReboot(false); S.state='idle'; S.t=0; releaseWake(); updateButtons();
+  if(DEV.on){ try{ await api('/api/reboot',{method:'POST'}); }catch(e){} await waitDevice(); }
+  else{ setLink(false,'Rebooting'); await sleep(2600); setLink(true); }
+  rebootBtn.disabled=false; fwReset();
+});
+
+/* touch screens: a long press should not open the browser's context menu (inputs keep theirs, for paste) */
+try{ if(matchMedia('(pointer:coarse)').matches) document.addEventListener('contextmenu',e=>{ if(!e.target.closest('input,textarea,select')) e.preventDefault(); }); }catch(e){}
+
+/* ============ online update ============
+   Settings are saved on the board. "Update now" makes the board leave its own Wi-Fi, join the saved network, download the
+   newest build from the GitHub release, install it and restart (which brings its Wi-Fi back). While it runs this page can't
+   reach it, so the result is read back from the board once it returns. */
+const UPD_ERR={
+  e1:'Could not join the Wi-Fi network. Check the name and password; the board only joins 2.4 GHz networks.',
+  e2:'Joined the Wi-Fi network but could not get the internet time. Is that network online?',
+  e3:'Could not find the release on GitHub. Check the repository name, and the token if it is a private repository.',
+  e4:'The download failed or stalled. Try again.',
+  e5:'The new firmware did not install. The old firmware is still running.'
+};
+const UP={info:null,busy:false,arm:0,dirty:{pass:false,tok:false}};
+const upSsid=$('#upSsid'), upPass=$('#upPass'), upRepo=$('#upRepo'), upTok=$('#upTok'), upSave=$('#upSave'), upGo=$('#upGo'), upGoTxt=$('#upGoTxt'), upNote=$('#upNote'), upLast=$('#upLast'), upTokClear=$('#upTokClear');
+function upMsg(t,bad){ upNote.textContent=t||''; upNote.style.color=bad?'var(--bad)':''; }
+function upRender(){
+  const i=UP.info, on=DEV.on&&!!i;
+  for(const e of [upSsid,upPass,upRepo,upTok,upSave]) e.disabled=!on||UP.busy;
+  upGo.disabled=!on||UP.busy||(!upSsid.value.trim()&&!(i&&i.ssid));
+  upTokClear.hidden=!(on&&i.hasToken);
+  upPass.placeholder=on&&i.hasPass?'Password saved (type to change)':'Wi-Fi password';
+  upTok.placeholder=on&&i.hasToken?'Token saved (type to change)':'Access token (private repo only)';
+  if(!on){ upMsg(DEV.on?'':'Available when this page is connected to the timer.'); upLast.textContent=''; return; }
+  if(/^Available when/.test(upNote.textContent)) upMsg('');
+  upLast.textContent=i.last==='ok'?'last: updated':(i.last?'last: failed':'v'+i.ver);
+}
+async function upLoad(){
+  if(!DEV.on){ UP.info=null; upRender(); return null; }
+  try{
+    const i=await api('/api/update'); UP.info=i;
+    if(document.activeElement!==upSsid) upSsid.value=i.ssid||'';
+    if(document.activeElement!==upRepo) upRepo.value=i.repo||'';
+    upPass.value=''; upTok.value=''; UP.dirty.pass=UP.dirty.tok=false;
+    upRender(); return i;
+  }catch(e){ upRender(); return null; }
+}
+upPass.addEventListener('input',()=>{ UP.dirty.pass=true; });
+upTok.addEventListener('input',()=>{ UP.dirty.tok=true; });
+upSsid.addEventListener('input',upRender);
+async function upSaveNow(extra){
+  const f=new URLSearchParams(); f.set('ssid',upSsid.value.trim()); f.set('repo',upRepo.value.trim());
+  if(UP.dirty.pass) f.set('pass',upPass.value);
+  if(UP.dirty.tok) f.set('token',upTok.value.trim());
+  if(extra) for(const [k,v] of Object.entries(extra)) f.set(k,v);
+  await api('/api/update/save',{method:'POST',body:f});
+}
+upSave.addEventListener('click',async()=>{
+  try{ await upSaveNow(); await upLoad(); upMsg('Saved on the timer.'); }
+  catch(e){ upMsg('Could not save. Check the repository name and the connection.',true); }
+});
+upTokClear.addEventListener('click',async()=>{
+  try{ await upSaveNow({token:''}); await upLoad(); upMsg('Token removed.'); }catch(e){ upMsg('Could not remove the token.',true); }
+});
+upGo.addEventListener('click',async()=>{
+  if(UP.busy||!DEV.on) return;
+  if(S.state==='run'||S.state==='pause'){ upMsg('Stop the timer first.',true); return; }
+  if(!UP.arm){ UP.arm=setTimeout(()=>{ UP.arm=0; upGoTxt.textContent='Update now'; },3500); upGoTxt.textContent='Tap again to start'; return; }   /* confirm() is unavailable, so two taps */
+  clearTimeout(UP.arm); UP.arm=0; upGoTxt.textContent='Starting…';
+  UP.busy=true; upRender();
+  try{
+    await upSaveNow();
+    await api('/api/update/start',{method:'POST'});
+  }catch(e){
+    UP.busy=false; upGoTxt.textContent='Update now'; upRender();
+    upMsg(/409/.test(String(e))?'The timer is busy. Stop it and try again.':'Could not start. Check the Wi-Fi name and the connection.',true); return;
+  }
+  const before=UP.info&&UP.info.ver;
+  upGoTxt.textContent='Updating…';
+  upMsg(DEV.net==='sta'
+    ? 'The timer is downloading the update on this network. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If this page does not reconnect, open http://beacon-timer.local.'
+    : 'The timer has left its own Wi-Fi to download the update. This takes 1 to 3 minutes. The LEDs show it is working: the Timer LED breathes, the Set LED shows the step and then a red to green bar. If your phone does not rejoin “Beacon-timer” by itself afterwards, rejoin it.');
+  S.state='idle'; S.t=0; releaseWake(); updateButtons();
+  const back=await waitDevice(130,'Updating');
+  UP.busy=false; upGoTxt.textContent='Update now';
+  if(!back){ upMsg('The timer has not come back yet. Rejoin “Beacon-timer” and reload this page; the result will be shown here.',true); upRender(); return; }
+  const i=await upLoad();
+  if(i&&i.last==='ok') upMsg(`Updated: now v${i.ver}${i.from?` (was v${i.from})`:''}.`);
+  else if(i&&i.last) upMsg(UPD_ERR[i.last]||'The update failed.',true);
+  else upMsg(i?'Back online. No update result was recorded.':'');
+});
+upRender();
+
+/* ============ saved timers ============
+   A saved timer is the whole timing + light setup under a name. Wiring (pins), brightness limits and the hide-LEDs switch
+   belong to the device / this screen, not to a timer, so loading one never touches them. On the board the list lives in
+   the board's own storage (so every phone sees it); in a plain browser it lives in this browser. */
+const PRESET_KEY='interval-beacon-presets-v1', ACTIVE_KEY='interval-beacon-active-preset', PRESET_MAX=20, PRESET_BYTES=30000;
+const PRESET_SKIP=['pins','blind','master','maxHz'];
+const P={list:[],active:null,editing:null,msgT:0};
+try{ P.active=localStorage.getItem(ACTIVE_KEY)||null; }catch(e){}
+const presetCfg=c=>{ const o=JSON.parse(JSON.stringify(c)); for(const k of PRESET_SKIP) delete o[k]; return o; };
+const presetKey=c=>JSON.stringify(presetCfg(normalize(c)));
+function presetMsg(t,bad){ const m=$('#pMsg'); m.textContent=t||''; m.style.color=bad?'var(--bad)':''; clearTimeout(P.msgT); if(t) P.msgT=setTimeout(()=>{ m.textContent=''; },4500); }
+function presetsClean(a){
+  if(!Array.isArray(a)) return [];
+  return a.filter(x=>x&&typeof x.id==='string'&&typeof x.name==='string'&&x.cfg&&typeof x.cfg==='object').slice(0,PRESET_MAX).map(x=>({id:x.id.slice(0,16),name:x.name.slice(0,24),cfg:x.cfg}));
+}
+async function presetsLoad(){
+  try{
+    if(DEV.on) P.list=presetsClean(await api('/api/presets'));
+    else P.list=presetsClean(JSON.parse(localStorage.getItem(PRESET_KEY)||'[]'));
+  }catch(e){ if(!DEV.on) P.list=[]; }
+  renderPresets();
+}
+async function presetsStore(next){                                    /* returns true when the new list is saved */
+  const body=JSON.stringify(next);
+  if(body.length>PRESET_BYTES){ presetMsg('Storage is full. Delete a saved timer first.',true); return false; }
+  try{
+    if(DEV.on) await api('/api/presets',{method:'POST',headers:{'Content-Type':'text/plain'},body});
+    else localStorage.setItem(PRESET_KEY,body);
+    P.list=next; return true;
+  }catch(e){ presetMsg(DEV.on?'Could not save to the timer. Check the connection.':'Could not save in this browser.',true); return false; }
+}
+const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function setActive(id){ P.active=id; try{ if(id) localStorage.setItem(ACTIVE_KEY,id); else localStorage.removeItem(ACTIVE_KEY); }catch(e){} }
+async function presetCreate(){
+  const inp=$('#pName'); let name=inp.value.trim().slice(0,24);
+  if(P.list.length>=PRESET_MAX){ presetMsg(`Up to ${PRESET_MAX} saved timers. Delete one to add another.`,true); return; }
+  if(!name) name='Timer '+(P.list.length+1);
+  const item={id:newId(),name,cfg:presetCfg(cfg)};
+  if(await presetsStore([...P.list,item])){ inp.value=''; setActive(item.id); presetMsg(`Saved "${name}".`); }
+  renderPresets();
+}
+async function presetUpdate(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  if(await presetsStore(P.list.map(x=>x.id===id?{...x,cfg:presetCfg(cfg)}:x))){ setActive(id); presetMsg(`Updated "${it.name}" with the current settings.`); }
+  renderPresets();
+}
+async function presetRename(id,name){
+  name=name.trim().slice(0,24); P.editing=null;
+  if(name&&await presetsStore(P.list.map(x=>x.id===id?{...x,name}:x))) presetMsg('Renamed.');
+  renderPresets();
+}
+async function presetDelete(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  if(await presetsStore(P.list.filter(x=>x.id!==id))){ if(P.active===id) setActive(null); presetMsg(`Deleted "${it.name}".`); }
+  renderPresets();
+}
+function presetLoadNow(id){
+  const it=P.list.find(x=>x.id===id); if(!it) return;
+  const keep={}; for(const k of PRESET_SKIP) keep[k]=cfg[k];
+  cfg=normalize(Object.assign({},it.cfg,keep));
+  rebuildAll(); doReset(); schedulePreviews(); scheduleSave(); setActive(id); renderPresets(); presetMsg(`Loaded "${it.name}".`);
+}
+/* a button that needs a second tap within 3 s: confirm() is unavailable, so destructive things ask twice */
+function twoTap(btn,armed,fn){
+  btn.addEventListener('click',()=>{
+    if(btn._arm){ clearTimeout(btn._arm); btn._arm=0; fn(); return; }
+    const was=btn.innerHTML; btn.classList.add('arm'); btn.textContent=armed;
+    btn._arm=setTimeout(()=>{ btn._arm=0; btn.classList.remove('arm'); btn.innerHTML=was; },3000);
+  });
+}
+function renderPresets(){
+  const box=$('#pList'); box.textContent='';
+  const act=P.list.find(x=>x.id===P.active);
+  $('#sum-presets').textContent=act?act.name:(P.list.length?`${P.list.length} saved`:'');
+  if(!P.list.length){ const n=el('p','note'); n.textContent='Nothing saved yet. Set the timer up the way you like, name it above and tap Save.'; box.append(n); return; }
+  const snap=presetKey(cfg);
+  for(const it of P.list){
+    const row=el('div','prow'+(it.id===P.active?' on':'')); 
+    if(P.editing===it.id){
+      const inp=el('input','txt'); inp.type='text'; inp.maxLength=24; inp.value=it.name; inp.setAttribute('aria-label','New name');
+      const ok=el('button','sb',ICON('check')); ok.type='button'; ok.setAttribute('aria-label','Save name');
+      const no=el('button','sb',ICON('x')); no.type='button'; no.setAttribute('aria-label','Cancel');
+      ok.addEventListener('click',()=>presetRename(it.id,inp.value)); no.addEventListener('click',()=>{ P.editing=null; renderPresets(); });
+      inp.addEventListener('keydown',e=>{ if(e.key==='Enter') presetRename(it.id,inp.value); else if(e.key==='Escape'){ P.editing=null; renderPresets(); } });
+      row.append(inp,ok,no); box.append(row); setTimeout(()=>{ inp.focus(); inp.select(); },0); continue;
+    }
+    const load=el('button','pload'); load.type='button'; load.setAttribute('aria-label','Load '+it.name);
+    const n=el('span','pn'); n.textContent=it.name;
+    const c=normalize(it.cfg), mod=it.id===P.active&&presetKey(it.cfg)!==snap;
+    const sub=el('span','ps'); sub.textContent=`${fmtDur(c.loadSec)} load · ${c.sets}×${c.repeat} · ${fmtDur(buildWindows(c).total)}${mod?' · changed':''}`;
+    load.append(n,sub);
+    const live=()=>S.state==='run'||S.state==='pause';
+    load.addEventListener('click',()=>{
+      if(!live()){ presetLoadNow(it.id); return; }
+      if(load._arm){ clearTimeout(load._arm); load._arm=0; presetLoadNow(it.id); return; }
+      sub.textContent='Tap again to replace the running timer';
+      load._arm=setTimeout(()=>{ load._arm=0; renderPresets(); },3000);
+    });
+    const upd=el('button','sb',ICON('save')); upd.type='button'; upd.setAttribute('aria-label','Update '+it.name+' with the current settings'); upd.title='Update with current settings';
+    const ren=el('button','sb',ICON('edit')); ren.type='button'; ren.setAttribute('aria-label','Rename '+it.name); ren.title='Rename';
+    const del=el('button','sb',ICON('trash')); del.type='button'; del.setAttribute('aria-label','Delete '+it.name); del.title='Delete';
+    twoTap(upd,'Overwrite?',()=>presetUpdate(it.id)); twoTap(del,'Delete?',()=>presetDelete(it.id));
+    ren.addEventListener('click',()=>{ P.editing=it.id; renderPresets(); });
+    row.append(load,upd,ren,del); box.append(row);
+  }
+}
+$('#pAdd').addEventListener('click',presetCreate);
+$('#pName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); presetCreate(); } });
+
+/* ============ boot ============ */
+function rebuildAll(){
+  PLAN=buildWindows(cfg); SET_COLORS=setColors(trackN(cfg)); CFG_VER++;
+  buildTiming(); syncTiming(); buildNames(); renderSetNames(); renderEditor('load'); renderEditor('trans'); renderEditor('lead');
+  buildLedBox(); buildPins(); renderLegend(); updateTotals(); updateSummaries(); applyBlind(); updateButtons();
+}
+function applyRemoteConfig(raw){ const blind=cfg.blind; cfg=normalize(raw); cfg.blind=blind; rebuildAll(); schedulePreviews(); }
+rebuildAll();
+presetsLoad();
+requestAnimationFrame(frame);
+devProbe();
+</script><script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(function(){});}</script></body></html>
