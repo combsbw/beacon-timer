@@ -266,12 +266,21 @@ static esp_err_t proxyReq(httpd_req_t* req) {
   const char* method = methodName(req->method);
   if (!method || !req->uri) return httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED, "method");
 
+  /* req->uri already includes ?query. Adding it again makes Start look like a request with no command. */
+  const char* target = req->uri;
   char query[200];
+  char targetBuf[700];
   query[0] = 0;
-  int qlen = httpd_req_get_url_query_len(req);
-  if (qlen > 0 && qlen < (int)sizeof query) httpd_req_get_url_query_str(req, query, sizeof query);
+  if (!strchr(req->uri, '?')) {
+    int qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < (int)sizeof query && httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK) {
+      snprintf(targetBuf, sizeof targetBuf, "%s?%s", req->uri, query);
+      target = targetBuf;
+    }
+  }
 
   char host[80];
+  host[0] = 0;
   if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof host) != ESP_OK) strncpy(host, TLS_HOST, sizeof host);
 
   char ctype[80];
@@ -283,12 +292,11 @@ static esp_err_t proxyReq(httpd_req_t* req) {
   if (!client.connect(WiFi.localIP(), 80)) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "page unavailable");
 
   char head[900];
-  int hlen = snprintf(head, sizeof head, "%s %s%s%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n",
-                      method, req->uri, query[0] ? "?" : "", query, host);
+  int hlen = snprintf(head, sizeof head, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %u\r\n",
+                      method, target, host, (unsigned)req->content_len);
   if (hlen < 0 || hlen >= (int)sizeof head) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
   if (req->content_len) {
-    int n = snprintf(head + hlen, sizeof head - hlen, "Content-Type: %s\r\nContent-Length: %u\r\n",
-                     ctype[0] ? ctype : "application/octet-stream", (unsigned)req->content_len);
+    int n = snprintf(head + hlen, sizeof head - hlen, "Content-Type: %s\r\n", ctype[0] ? ctype : "application/octet-stream");
     if (n < 0 || hlen + n >= (int)sizeof head) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
     hlen += n;
   }
@@ -296,6 +304,7 @@ static esp_err_t proxyReq(httpd_req_t* req) {
   memcpy(head + hlen, "\r\n", 2);
   hlen += 2;
   if (client.write((const uint8_t*)head, hlen) != (size_t)hlen) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
+  client.flush();
 
   uint8_t* buf = (uint8_t*)malloc(1024);
   if (!buf) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "memory"); }
@@ -313,6 +322,7 @@ static esp_err_t proxyReq(httpd_req_t* req) {
     }
     left -= (size_t)n;
   }
+  client.flush();
 
   char* hdr = (char*)malloc(2048);
   if (!hdr) { free(buf); client.stop(); return ESP_FAIL; }

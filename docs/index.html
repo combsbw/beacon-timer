@@ -668,7 +668,7 @@ function loadCfg(){
 }
 let cfg=loadCfg();
 let CFG_VER=0, saveT=0;
-function scheduleSave(){ clearTimeout(saveT); saveT=setTimeout(()=>{ try{ localStorage.setItem(STORE_KEY,JSON.stringify(cfg)); }catch(e){} },300); devPush(); }
+function scheduleSave(){ DEV.gen++; clearTimeout(saveT); saveT=setTimeout(()=>{ try{ localStorage.setItem(STORE_KEY,JSON.stringify(cfg)); }catch(e){} },300); devPush(); }
 
 /* ============ theme ============ */
 /* One background for the whole page. Canvases read the live theme tokens so they match in light and dark. */
@@ -756,14 +756,16 @@ function releaseWake(){ try{ if(S.wake){ S.wake.release(); S.wake=null; } }catch
 function acquireWake(){ try{ if(navigator.wakeLock&&!S.wake) navigator.wakeLock.request('screen').then(l=>{ S.wake=l; l.addEventListener('release',()=>{ if(S.wake===l) S.wake=null; }); }).catch(()=>{}); }catch(e){} }
 document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'&&S.state==='run') acquireWake(); });
 
-function doReset(){ S.state='idle'; S.t=0; releaseWake(); updateButtons(); devCmd('reset'); }
+function doReset(){ DEV.gen++; S.state='idle'; S.t=0; releaseWake(); updateButtons(); devCmd('reset'); }
 function doStart(){
+  DEV.gen++;
   if(S.state==='done'||S.state==='stopped'||S.t>=PLAN.total) S.t=0;
   S.state='run'; acquireWake(); updateButtons(); devCmd('start',S.t);
 }
-function doPause(){ S.state='pause'; releaseWake(); updateButtons(); devCmd('pause'); }
-function doStop(){ if(S.state==='run'||S.state==='pause'||(S.state==='preview'&&S.t>0)){ S.state='stopped'; releaseWake(); updateButtons(); devCmd('stop'); } }
+function doPause(){ DEV.gen++; S.state='pause'; releaseWake(); updateButtons(); devCmd('pause'); }
+function doStop(){ if(S.state==='run'||S.state==='pause'||(S.state==='preview'&&S.t>0)){ DEV.gen++; S.state='stopped'; releaseWake(); updateButtons(); devCmd('stop'); } }
 function seek(t){
+  DEV.gen++;
   S.t=clamp(t,0,PLAN.total-0.001);
   if(S.state!=='run') S.state='preview';
   updateButtons(); devSeek(S.t);
@@ -1239,7 +1241,7 @@ function buildPins(){
 /* ============ device link ============ */
 /* On the timer's own page (http, or https://beacon-timer.local) this talks to the sketch: it polls the timer
    state, pushes settings and sends commands. On any other site nothing answers, so the timer stands alone. */
-const DEV={on:false,rev:-1,seq:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
+const DEV={on:false,rev:-1,seq:0,gen:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function api(path,opt){
   opt=Object.assign({},opt||{});
@@ -1299,16 +1301,35 @@ function devPush(){
 async function devPoll(){
   if(!DEV.on) return;
   if(!DEV.rebooting){
-    const seq=DEV.seq, t0=performance.now();
+    const gen=DEV.gen, seq=DEV.seq, t0=performance.now();
     try{
       const j=await api('/api/state'), rtt=performance.now()-t0;
       if(DEV.fails>=3) setLink(true);
       DEV.fails=0;
-      if(seq===DEV.seq) devApplyState(j,rtt);
-      if(j.rev!==DEV.rev&&!DEV.pending){ DEV.rev=j.rev; applyRemoteConfig(await api('/api/config')); }
+      /* A control can land while this request is in flight. The reply is then the old
+         state, and applying it would undo the press. HTTPS makes that reply slow enough to win. */
+      if(gen===DEV.gen&&seq===DEV.seq){
+        devApplyState(j,rtt);
+        if(j.rev!==DEV.rev&&!DEV.pending){
+          const raw=await api('/api/config');
+          if(gen===DEV.gen&&!DEV.pending){ DEV.rev=j.rev; applyRemoteConfig(raw); }
+        }
+      }
     }catch(e){ if(++DEV.fails===3) setLink(false,'Offline'); }
   }
   setTimeout(devPoll,DEV.fails?1500:(DEV.asleep?4000:300));
+}
+async function pushLocal(){
+  const gen=DEV.gen;
+  try{
+    const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(cfg),timeout:8000});
+    if(gen!==DEV.gen) return;
+    if(r&&typeof r.rev==='number') DEV.rev=r.rev;
+  }catch(e){}
+  if(gen!==DEV.gen) return;
+  const cmd=S.state==='run'?'start':S.state==='pause'?'pause':S.state==='stopped'?'stop':(S.state==='preview'?'seek':null);
+  if(!cmd) return;
+  try{ const j=await api('/api/cmd?c='+cmd+'&t='+S.t.toFixed(3),{method:'POST',timeout:8000}); if(gen===DEV.gen) devApplyState(j,0); }catch(e){}
 }
 async function devProbe(){
   const home=location.hostname==='beacon-timer.local';
@@ -1318,8 +1339,10 @@ async function devProbe(){
       const j=await api('/api/state',{timeout:home?8000:3000});
       if(!j||j.app!=='beacon') return;
       DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
-      applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0);
-      setLink(true); presetsLoad(); upLoad(); netLoad(); devPoll();
+      setLink(true);
+      if(DEV.gen){ DEV.rev=j.rev; await pushLocal(); }   /* the page was already used before the board answered */
+      else{ applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0); }
+      presetsLoad(); upLoad(); netLoad(); devPoll();
       return;
     }catch(e){ if(i+1<tries) await sleep(1000); }
   }
