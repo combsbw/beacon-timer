@@ -30,7 +30,10 @@ page = (
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
     "<meta name=\"theme-color\" content=\"#0b0e10\"><title>Beacon Timer</title>"
-    + style + "</head><body>" + body + "</body></html>"
+    + style + "</head><body>" + body
+    # Earlier firmware registered a service worker for this address. This build has none, so remove the old one and its cache.
+    + "<script>try{if('serviceWorker' in navigator)navigator.serviceWorker.getRegistrations().then(function(r){r.forEach(function(x){x.unregister();});});"
+    "if(window.caches)caches.keys().then(function(k){k.forEach(function(n){caches.delete(n);});});}catch(e){}</script></body></html>"
 )
 
 raw = page.encode("utf-8")
