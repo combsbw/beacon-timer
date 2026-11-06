@@ -13,6 +13,7 @@ namespace bc {
 enum { MAX_SETS = 20, MAX_CYC = MAX_SETS * 3, MAX_STOPS = 5 };
 static const double TAU_D = 6.283185307179586476925286766559;
 static const float TAU_F = 6.28318530717958647692f;
+static const float PI_F = 3.14159265358979323846f;
 static const float GAMMA_F = 2.2f;
 
 struct Rgb { float r, g, b; };
@@ -84,6 +85,8 @@ struct Profile {
   float finalSec;              // load: the last finalSec seconds run the accelerating pulse; a longer load pulses slowly through the colors before that
   float longCycle, longDim;    // load, long part: slow pulse cycle (s) and its dim level (percent)
   float markEvery;             // load, long part: seconds between time-mark double flashes (0 = off)
+  int finalStyle;              // load, long loads: 0 = blink ramp in the final stretch, 1 = the accelerating pulse train
+  float blinkSec, blinkHz;     // blink ramp: length of the blinking part (s) and the rate it ends at (Hz)
   float solid, fade;           // load: seconds of solid first color at the start of the window, then the fade into the pulses
   float glow;                  // percent, the dim level between pulses ("floor" in the UI)
   float blend;                 // percent, color crossfade
@@ -123,7 +126,7 @@ struct Config {
     Profile l;
     memset(&l, 0, sizeof l);
     l.rate0 = 10; l.rate1 = 150; l.curve = 3; l.duty0 = 60; l.duty1 = 30; l.soft0 = 100; l.soft1 = 0;
-    l.solid = 3; l.fade = 1; l.finalSec = 30; l.longCycle = 4; l.longDim = 15; l.markEvery = 0; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
+    l.solid = 3; l.fade = 1; l.finalSec = 30; l.longCycle = 4; l.longDim = 15; l.markEvery = 0; l.finalStyle = 0; l.blinkSec = 15; l.blinkHz = 3; l.glow = 0; l.blend = 30; l.breath = 2; l.tail = 5; l.f0 = 1; l.f1 = 7;
     l.nColors = 4; l.colors[0] = hex(0x22e070); l.colors[1] = hex(0xffd51a); l.colors[2] = hex(0xff7a14); l.colors[3] = hex(0xff1f2d);
     load = l;
     trans = transDefaults();
@@ -239,6 +242,37 @@ inline void setColors(int N, Rgb* out) {
 // ---- LED outputs --------------------------------------------------------------------------------------------------
 struct Led { Rgb c; float b; };    // color 0..255 per channel, brightness 0..1
 
+
+// Final stretch of a long load, "blink ramp" style. One waveform family runs the whole way, so nothing jumps:
+// it starts as the slow cosine pulse of the long part, speeds up a little for the first (F - blinkSec) seconds, then becomes a
+// soft-edged blink with a longer on-time whose rate climbs to blinkHz at the end of the window. Edges are raised cosines.
+inline float rcStep(float x) { return x <= 0.f ? 0.f : (x >= 1.f ? 1.f : 0.5f - 0.5f * cosf(PI_F * x)); }
+inline float blinkEnvelope(const Profile& pr, double F, double head, double tau, float maxHz) {
+  double Fb = fmin((double)pr.blinkSec, F * 0.75), Fa = F - Fb;
+  double f0 = 1.0 / (double)pr.longCycle, fA = f0 * 2.4;
+  double fM = fmin((double)pr.blinkHz, (double)maxHz);
+  if (fM < fA) fM = fA;
+  const double P = 1.5;
+  double cyc, u, s = 0.0;
+  if (tau <= Fa) {
+    cyc = f0 * tau + (fA - f0) * tau * tau / (2.0 * Fa);
+    u = tau / Fa;
+  } else {
+    double sg = tau - Fa;
+    s = clampd(sg / Fb, 0.0, 1.0);
+    cyc = f0 * Fa + (fA - f0) * Fa * 0.5 + fA * sg + (fM - fA) * Fb * pow(s, P + 1.0) / (P + 1.0);
+    u = 1.0;
+  }
+  double p0 = fmod(fmod(head, (double)pr.longCycle) / (double)pr.longCycle + 0.5, 1.0);   // the long part peaks at phase 0, this family at 0.5
+  float p = (float)fmod(p0 + cyc, 1.0);
+  float D = 0.5f + 0.08f * (float)u + 0.08f * (float)s;
+  float e = 0.5f - 0.2f * (float)u - 0.08f * (float)s;
+  float dim = pr.longDim / 100.f;
+  float fl = lerpf(dim, dim < 0.04f ? dim : 0.04f, (float)s);
+  float w = rcStep(p / e) * (1.f - rcStep((p - D) / e));
+  return fl + (1.f - fl) * w;
+}
+
 // Load window. The last finalSec seconds (30 by default; the whole window when it is shorter) run the accelerating pulse and
 // step through the colors. A longer load pulses slowly before that, one color after another, each getting an equal share
 // of the time; the final stretch then starts again at the first color.
@@ -255,12 +289,16 @@ inline Led pulseLed(const Profile& pr, double len, double local, float maxHz) {
     b = dim + (1.f - dim) * (0.5f + 0.5f * cosf(TAU_F * (float)(fmod(local, (double)pr.longCycle) / (double)pr.longCycle)));   // starts at the peak
   } else {
     double lt = local - head;
-    double f0 = fmin((double)pr.rate0 / F, (double)maxHz), f1 = fmin((double)pr.rate1 / F, (double)maxHz);
-    Accel a = accelOf(lt, F, f0, f1, pr.curve);
-    float x = (float)(a.cyc - floor(a.cyc));
-    float w = pulseShape(x, lerpf(pr.duty0, pr.duty1, a.q) / 100.f, lerpf(pr.soft0, pr.soft1, a.q) / 100.f);
-    float fl = pr.glow / 100.f;
-    b = fl + (1.f - fl) * w;
+    if (head > 0.0 && pr.finalStyle == 0) {                    // long load: soft blink ramp
+      b = blinkEnvelope(pr, F, head, lt, maxHz);
+    } else {
+      double f0 = fmin((double)pr.rate0 / F, (double)maxHz), f1 = fmin((double)pr.rate1 / F, (double)maxHz);
+      Accel a = accelOf(lt, F, f0, f1, pr.curve);
+      float x = (float)(a.cyc - floor(a.cyc));
+      float w = pulseShape(x, lerpf(pr.duty0, pr.duty1, a.q) / 100.f, lerpf(pr.soft0, pr.soft1, a.q) / 100.f);
+      float fl = pr.glow / 100.f;
+      b = fl + (1.f - fl) * w;
+    }
     c = gradientAt(pr.colors, K, (float)(lt / F), pr.blend / 100.f);
   }
   float S = (float)fmin((double)pr.solid, len * 0.5), Fd = (float)fmin((double)pr.fade, len * 0.25);

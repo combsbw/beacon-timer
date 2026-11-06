@@ -49,6 +49,9 @@ button{cursor:pointer}
 .link{display:flex;align-items:center;gap:8px;font:500 12px var(--font-mono);color:var(--muted)}
 .link.wake{cursor:pointer}
 .link.wake #linkTxt{color:var(--ink)}
+.link.act{cursor:pointer;padding:0 12px;min-height:34px;border:1px solid var(--line);border-radius:999px;background:var(--field);color:var(--ink)}
+.link.act:active{opacity:.7}
+.link.act #linkTxt{color:var(--ink)}
 .link .ic{width:18px;height:18px}
 .dotc{width:8px;height:8px;border-radius:50%;background:var(--ok)}
 .dotc.busy{background:var(--busy)}
@@ -413,7 +416,16 @@ a.fbtn{text-decoration:none;width:fit-content}
               <label class="sw"><input type="checkbox" id="netSta" role="switch" aria-label="Join home Wi-Fi"><i></i></label>
             </div>
             <p class="note" id="netNote" aria-live="polite"></p>
+            <div class="rr" id="txRow" hidden><label for="txSeg">Radio power</label>
+              <div class="seg" id="txSeg" role="group" aria-label="Radio power">
+                <button type="button" data-v="0" aria-pressed="false">Full</button><button type="button" data-v="1" aria-pressed="false">Reduced</button><button type="button" data-v="2" aria-pressed="false">Low</button>
+              </div>
+            </div>
+            <p class="note" id="pwrNote"></p>
+            <p class="note" id="boNote" style="color:var(--bad)" hidden></p>
             <div class="fwrow">
+              <button class="fbtn primary" id="connBtn" type="button" hidden><svg class="ic"><use href="#i-wifi"/></svg><span id="connTxt">Connect</span></button>
+              <button class="fbtn" id="boClear" type="button" hidden><svg class="ic"><use href="#i-x"/></svg><span>Clear power dips</span></button>
               <button class="fbtn" id="sleepBtn" type="button" hidden><svg class="ic"><use href="#i-moon"/></svg><span>Sleep</span></button>
               <button class="fbtn primary" id="wakeBtn" type="button" hidden><svg class="ic"><use href="#i-sun"/></svg><span>Wake</span></button>
               <button class="fbtn primary" id="netGo" type="button" hidden><svg class="ic"><use href="#i-power"/></svg><span id="netGoTxt">Reboot</span></button>
@@ -507,6 +519,23 @@ function accel(local,len,f0,f1,n){
   return {q:Math.pow(p,n),cyc:f0*local+(f1-f0)*len/(n+1)*Math.pow(p,n+1)};
 }
 
+/* Final stretch of a long load, "blink ramp" style. One waveform family runs the whole way, so nothing jumps: it starts as the
+   slow cosine pulse of the long part, speeds up a little for the first (F - blinkSec) seconds, then becomes a soft-edged blink
+   with a longer on-time whose rate climbs to blinkHz at the end of the window. Edges are raised cosines. */
+const rcStep=x=>x<=0?0:(x>=1?1:0.5-0.5*Math.cos(Math.PI*x));
+function blinkEnvelope(prof,F,head,tau,maxHz){
+  const Fb=Math.min(prof.blinkSec,F*0.75), Fa=F-Fb, f0=1/prof.longCycle, fA=f0*2.4, P=1.5;
+  const fM=Math.max(Math.min(prof.blinkHz,maxHz),fA);
+  let cyc,u,s=0;
+  if(tau<=Fa){ cyc=f0*tau+(fA-f0)*tau*tau/(2*Fa); u=tau/Fa; }
+  else{ const sg=tau-Fa; s=clamp(sg/Fb,0,1); cyc=f0*Fa+(fA-f0)*Fa*0.5+fA*sg+(fM-fA)*Fb*Math.pow(s,P+1)/(P+1); u=1; }
+  const p0=((head%prof.longCycle)/prof.longCycle+0.5)%1;            /* the long part peaks at phase 0, this family at 0.5 */
+  const p=(p0+cyc)%1;
+  const D=0.5+0.08*u+0.08*s, e=0.5-0.2*u-0.08*s, dim=prof.longDim/100;
+  const fl=lerp(dim,dim<0.04?dim:0.04,s);
+  return fl+(1-fl)*(rcStep(p/e)*(1-rcStep((p-D)/e)));
+}
+
 /* Load window. The last `final` seconds (30 by default; the whole window when it is shorter) run the accelerating pulse:
    rate, duty cycle and edge softness all follow one curve and the colors step through the gradient. Anything longer than
    that is a "long load": before the final stretch the light pulses slowly, one color after another, each color getting an
@@ -521,6 +550,10 @@ const PULSE={
     {k:'longCycle',l:'Cycle',min:2,max:20,step:1,u:' s'},
     {k:'longDim',l:'Dim',min:0,max:60,step:1,u:'%'},
     {k:'markEvery',l:'Marks',min:0,max:600,step:10,u:' s',off:'off'},
+    {g:'Final stretch of a long load'},
+    {k:'finalStyle',l:'Style',choice:[[0,'Blink ramp'],[1,'Pulse train']],redo:true},
+    {k:'blinkSec',l:'Blink',min:5,max:60,step:1,u:' s',when:p=>p.finalStyle===0},
+    {k:'blinkHz',l:'Blink to',min:1,max:7,step:0.5,u:' Hz',when:p=>p.finalStyle===0},
     {g:'Rate per final stretch'},
     {k:'rate0',l:'Start',min:1,max:60,step:1,u:''},
     {k:'rate1',l:'End',min:2,max:300,step:1,u:''},
@@ -546,11 +579,16 @@ const PULSE={
       c=gradientAt(stopsOf(prof),local/head,w);
       const dim=prof.longDim/100;
       b=dim+(1-dim)*(0.5+0.5*Math.cos(TAU*local/prof.longCycle));     /* starts at the peak, like the start flash */
-    }else{                                                            /* final stretch: the normal accelerating sequence from the first color */
-      const lt=local-head, f0=Math.min(prof.rate0/F,G.maxHz), f1=Math.min(prof.rate1/F,G.maxHz), fl=prof.floor/100;
-      const a=accel(lt,F,f0,f1,prof.curve);
-      const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
-      b=fl+(1-fl)*w; c=gradientAt(stopsOf(prof),lt/F,prof.blend/100);
+    }else{                                                            /* final stretch: the colors run from the first color */
+      const lt=local-head;
+      if(head>0&&prof.finalStyle===0) b=blinkEnvelope(prof,F,head,lt,G.maxHz);       /* long load: soft blink ramp */
+      else{
+        const f0=Math.min(prof.rate0/F,G.maxHz), f1=Math.min(prof.rate1/F,G.maxHz), fl=prof.floor/100;
+        const a=accel(lt,F,f0,f1,prof.curve);
+        const w=pulseShape(a.cyc-Math.floor(a.cyc),lerp(prof.duty0,prof.duty1,a.q)/100,lerp(prof.soft0,prof.soft1,a.q)/100);
+        b=fl+(1-fl)*w;
+      }
+      c=gradientAt(stopsOf(prof),lt/F,prof.blend/100);
     }
     /* the first seconds are a solid light in the first color, then it fades out into what follows */
     const S=Math.min(prof.solid,L*0.5), Fd=Math.min(prof.fade,L*0.25);
@@ -619,7 +657,7 @@ function defaults(){
     holdMs:0,maxHz:7,master:100,blind:false,
     pins:{timer:{r:13,g:11,b:10,com:12,anode:true},set:{r:2,g:4,b:5,com:3,anode:true}},
     profiles:{
-      load:{solid:3,fade:1,final:30,longCycle:4,longDim:15,markEvery:0,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
+      load:{solid:3,fade:1,final:30,longCycle:4,longDim:15,markEvery:0,finalStyle:0,blinkSec:15,blinkHz:3,rate0:10,rate1:150,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,floor:0,blend:30,colors:[...PAL.load]},
       trans:transProfile(),
       lead:transProfile()
     }
@@ -647,7 +685,7 @@ function normalize(raw){
   for(const k of Object.keys(d.names)) d.names[k]=String(d.names[k]).slice(0,24);
   d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
   d.profiles.load.solid=clamp(d.profiles.load.solid,0,10); d.profiles.load.fade=clamp(d.profiles.load.fade,0,5);
-  { const L=d.profiles.load; L.final=clamp(L.final,10,120); L.longCycle=clamp(L.longCycle,2,20); L.longDim=clamp(L.longDim,0,60); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); }
+  { const L=d.profiles.load; L.final=clamp(L.final,10,120); L.longCycle=clamp(L.longCycle,2,20); L.longDim=clamp(L.longDim,0,60); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); L.finalStyle=L.finalStyle===1?1:0; L.blinkSec=clamp(L.blinkSec,5,60); L.blinkHz=clamp(L.blinkHz,1,7); }
   d.leadSec=clamp(d.leadSec,1,600); d.holdMs=clamp(d.holdMs,0,1000); d.maxHz=clamp(d.maxHz,1,8); d.master=clamp(d.master,10,100);
   const dp=defaults().pins;
   for(const k of ['timer','set']){
@@ -1241,7 +1279,12 @@ function buildPins(){
 /* ============ device link ============ */
 /* On the timer's own page (http, or https://beacon-timer.local) this talks to the sketch: it polls the timer
    state, pushes settings and sends commands. On any other site nothing answers, so the timer stands alone. */
-const DEV={on:false,rev:-1,seq:0,gen:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false};
+const DEV={on:false,rev:-1,seq:0,gen:0,fails:0,rebooting:false,pending:false,inflight:0,pushT:0,seekT:0,seekV:0,asleep:false,net:'',fail:false,polling:false,rst:'',bo:0,heap:0,rssi:0};
+/* Pages the board can serve: its names and any private address. Anywhere else (GitHub Pages, the artifact) the timer stands alone and never searches for a board. */
+const HOSTN=location.hostname;
+const DEV_LIKE=/^https?:$/.test(location.protocol)&&(HOSTN==='beacon-timer.local'||HOSTN==='localhost'||HOSTN==='127.0.0.1'||/\.local$/.test(HOSTN)||/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(HOSTN));
+const CONN={busy:false,n:0,t:0};
+const RECON='Reconnect';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function api(path,opt){
   opt=Object.assign({},opt||{});
@@ -1250,8 +1293,31 @@ function api(path,opt){
   return fetch(path,Object.assign({signal:c.signal,cache:'no-store'},opt))
     .then(r=>{ if(!r.ok) throw new Error(String(r.status)); return r.json(); }).finally(()=>clearTimeout(t));
 }
+/* One request that does not wait out a slow or lost first attempt. If the first try has not answered after `gap` ms, or it fails, another is
+   started (up to `max`), and the first good answer wins. Only for requests that are safe to repeat: the state poll and wake. */
+function hedged(path,opt){
+  opt=Object.assign({},opt||{});
+  const tls=location.protocol==='https:';
+  const gap=opt.gap||(tls?2400:700), max=opt.max||(tls?2:3), each=opt.timeout||(tls?8000:3500);
+  delete opt.gap; delete opt.max; delete opt.timeout;
+  return new Promise((resolve,reject)=>{
+    const ctl=[]; let done=false, launched=0, pending=0, timer=0, last=null;
+    const finish=(ok,v)=>{ if(done) return; done=true; clearTimeout(timer); ctl.forEach(c=>{ try{ c.abort(); }catch(e){} }); ok?resolve(v):reject(v); };
+    const next=()=>{ if(done||launched>=max) return; start(); timer=setTimeout(next,gap); };
+    const start=()=>{
+      launched++; pending++;
+      const c=new AbortController(), to=setTimeout(()=>c.abort(),each); ctl.push(c);
+      fetch(path,Object.assign({signal:c.signal,cache:'no-store'},opt))
+        .then(r=>{ if(!r.ok) throw new Error(String(r.status)); return r.json(); })
+        .then(v=>{ clearTimeout(to); finish(true,v); })
+        .catch(e=>{ clearTimeout(to); if(done) return; last=e; pending--;
+          if(pending===0){ clearTimeout(timer); if(launched>=max) finish(false,last); else next(); } });
+    };
+    next();
+  });
+}
 function linkLabel(){
-  if(!DEV.on) return '192.168.4.1';
+  if(!DEV.on) return DEV_LIKE?(CONN.busy?'Connecting…':'Connect'):'Standalone';
   if(DEV.asleep) return 'Asleep';
   if(DEV.net==='sta') return location.host;
   return DEV.fail?'AP fallback':'192.168.4.1';
@@ -1261,14 +1327,19 @@ function setLink(ok,text){
   const label=text||linkLabel();
   $('#linkTxt').textContent=label;
   const wake=!!(DEV.on&&DEV.asleep&&label==='Asleep');
+  const act=!wake&&((!DEV.on&&DEV_LIKE&&!CONN.busy)||(DEV.on&&!DEV.rebooting&&label===RECON));
   const chip=$('#linkChip');
-  chip.classList.toggle('wake',wake);
-  if(wake){ chip.setAttribute('role','button'); chip.setAttribute('aria-label','Wake the timer'); }
-  else{ chip.removeAttribute('role'); chip.removeAttribute('aria-label'); }
+  chip.classList.toggle('wake',wake); chip.classList.toggle('act',act);
+  if(wake||act){ chip.setAttribute('role','button'); chip.tabIndex=0; chip.setAttribute('aria-label',wake?'Wake the timer':'Connect to the timer'); }
+  else{ chip.removeAttribute('role'); chip.removeAttribute('tabindex'); chip.removeAttribute('aria-label'); }
 }
 function devNote(j){
   if(!j) return;
   DEV.asleep=!!j.sleep; if(j.net) DEV.net=j.net; DEV.fail=!!j.fail;
+  if(typeof j.rst==='string') DEV.rst=j.rst;
+  if(typeof j.bo==='number') DEV.bo=j.bo;
+  if(typeof j.heap==='number') DEV.heap=j.heap;
+  if(typeof j.rssi==='number') DEV.rssi=j.rssi;
 }
 const STATES=['idle','run','pause','preview','done','stopped'];
 function devApplyState(j,rtt){
@@ -1303,8 +1374,8 @@ async function devPoll(){
   if(!DEV.rebooting){
     const gen=DEV.gen, seq=DEV.seq, t0=performance.now();
     try{
-      const j=await api('/api/state'), rtt=performance.now()-t0;
-      if(DEV.fails>=3) setLink(true);
+      const j=await (DEV.fails?hedged('/api/state'):api('/api/state')), rtt=performance.now()-t0;
+      if(DEV.fails>=3){ setLink(true); renderNet(); }
       DEV.fails=0;
       /* A control can land while this request is in flight. The reply is then the old
          state, and applying it would undo the press. HTTPS makes that reply slow enough to win. */
@@ -1315,7 +1386,7 @@ async function devPoll(){
           if(gen===DEV.gen&&!DEV.pending){ DEV.rev=j.rev; applyRemoteConfig(raw); }
         }
       }
-    }catch(e){ if(++DEV.fails===3) setLink(false,'Offline'); }
+    }catch(e){ if(++DEV.fails===3){ setLink(false,RECON); renderNet(); } }
   }
   setTimeout(devPoll,DEV.fails?1500:(DEV.asleep?4000:300));
 }
@@ -1331,21 +1402,42 @@ async function pushLocal(){
   if(!cmd) return;
   try{ const j=await api('/api/cmd?c='+cmd+'&t='+S.t.toFixed(3),{method:'POST',timeout:8000}); if(gen===DEV.gen) devApplyState(j,0); }catch(e){}
 }
-async function devProbe(){
-  const home=location.hostname==='beacon-timer.local';
-  const tries=home?3:1;
-  for(let i=0;i<tries;i++){
-    try{
-      const j=await api('/api/state',{timeout:home?8000:3000});
-      if(!j||j.app!=='beacon') return;
-      DEV.on=true; $('#fwVer').textContent='v'+(j.ver||'?');
-      setLink(true);
-      if(DEV.gen){ DEV.rev=j.rev; await pushLocal(); }   /* the page was already used before the board answered */
-      else{ applyRemoteConfig(await api('/api/config')); DEV.rev=j.rev; devApplyState(j,0); }
-      presetsLoad(); upLoad(); netLoad(); devPoll();
-      return;
-    }catch(e){ if(i+1<tries) await sleep(1000); }
+/* Joining the board. The first answer from the state call attaches the page to it. A page the board serves keeps looking until it is found
+   (every few seconds, and at once when the page comes back to the front), so a missed first try no longer leaves it unconnected.
+   The Connect button (header, and Settings > Device) does the same on demand, and also sends a wake. */
+async function devAttach(j){
+  const first=!DEV.on;
+  DEV.fails=0; DEV.rebooting=false; CONN.n=0;
+  $('#fwVer').textContent='v'+(j.ver||'?');
+  if(!first){ setLink(true); devApplyState(j,0); return; }
+  try{
+    if(DEV.gen){ DEV.on=true; DEV.rev=j.rev; setLink(true); await pushLocal(); }   /* the page was already used before the board answered */
+    else{ const raw=await api('/api/config',{timeout:8000}); DEV.on=true; setLink(true); applyRemoteConfig(raw); DEV.rev=j.rev; devApplyState(j,0); }
+  }catch(e){ DEV.on=false; throw e; }
+  presetsLoad(); upLoad(); netLoad();
+  if(!DEV.polling){ DEV.polling=true; devPoll(); }
+}
+async function devConnect(manual){
+  if(CONN.busy) return false;
+  if(DEV.on&&!manual) return true;
+  CONN.busy=true; CONN.n++;
+  clearTimeout(CONN.t);
+  const loud=manual||CONN.n===1;                                       /* automatic retries stay quiet so the label does not flicker */
+  if(loud){ setLink(false,'Connecting…'); renderNet(); }
+  let ok=false;
+  try{
+    let j=null;
+    if(manual){ try{ j=await hedged('/api/wake',{method:'POST'}); }catch(e){ j=null; } }
+    if(!j) j=await hedged('/api/state',DEV_LIKE?{}:{max:1});
+    if(j&&j.app==='beacon'){ await devAttach(j); ok=true; }
+  }catch(e){}
+  CONN.busy=false;
+  if(!ok){
+    setLink(false,DEV.on?RECON:undefined);
+    if(!DEV.on&&DEV_LIKE) CONN.t=setTimeout(()=>devConnect(false),Math.min(1500+CONN.n*700,6000));
   }
+  renderNet();
+  return ok;
 }
 async function waitDevice(tries=45,label='Rebooting'){
   DEV.rebooting=true; setLink(false,label); await sleep(2500);
@@ -1353,12 +1445,13 @@ async function waitDevice(tries=45,label='Rebooting'){
     try{ const j=await api('/api/state'); if(j&&j.app==='beacon'){ DEV.rebooting=false; DEV.fails=0; setLink(true); DEV.rev=j.rev; $('#fwVer').textContent='v'+(j.ver||'?'); devApplyState(j,0); return true; } }catch(e){}
     await sleep(800);
   }
-  DEV.rebooting=false; setLink(false,'Offline'); return false;
+  DEV.rebooting=false; setLink(false,RECON); return false;
 }
 
 /* ============ home network / sleep ============ */
 /* The switch picks the mode. Reboot applies it. Credentials are the Online update fields (wSsid / wPass on the board). */
 const NET={info:null,hold:false,arm:0,key:''};
+const txRow=$('#txRow'), txSeg=$('#txSeg'), pwrNote=$('#pwrNote'), boNote=$('#boNote'), boClear=$('#boClear'), connBtn=$('#connBtn'), connTxt=$('#connTxt');
 const netSta=$('#netSta'), netNote=$('#netNote'), netStat=$('#netStat'), netGo=$('#netGo'), netGoTxt=$('#netGoTxt'), sleepBtn=$('#sleepBtn'), wakeBtn=$('#wakeBtn');
 function devSummary(){
   if(pinConflicts()) return '⚠';
@@ -1369,6 +1462,13 @@ function devSummary(){
 }
 function netMsg(t,bad){ netNote.textContent=t||''; netNote.style.color=bad?'var(--bad)':''; }
 function netSsid(){ return (upSsid.value.trim()||(NET.info&&NET.info.ssid)||''); }
+function pwrText(){
+  const p=[];
+  if(DEV.rst) p.push('last reset: '+DEV.rst);
+  if(DEV.net==='sta'&&DEV.rssi) p.push('signal '+DEV.rssi+' dBm');
+  if(DEV.heap) p.push('free memory '+Math.round(DEV.heap/1024)+' kB');
+  return p.join(' · ');
+}
 function renderNet(){
   const i=NET.info, on=DEV.on&&!!i;
   const sta=on&&i.radio==='sta';
@@ -1376,12 +1476,21 @@ function renderNet(){
   wakeBtn.hidden=!sta||!DEV.asleep;
   netGo.hidden=!NET.hold;
   netSta.disabled=!on;
+  const lost=DEV.on&&DEV.fails>=3, find=DEV_LIKE&&(!DEV.on||lost);
+  connBtn.hidden=!find; connBtn.disabled=CONN.busy; connTxt.textContent=CONN.busy?'Connecting…':(DEV.on?'Reconnect':'Connect');
   netStat.textContent=on?(sta?(DEV.asleep?'asleep':i.ip):(i.fail?'fallback':i.ip)):'';
   if(!NET.hold) netSta.checked=on&&i.wanted==='sta';
-  const key=!on?'off':[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0].join('|');
+  txRow.hidden=!on;
+  if(on) txSeg.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',Number(b.dataset.v)===i.tx));
+  const pt=on?pwrText():''; if(pwrNote.textContent!==pt) pwrNote.textContent=pt;
+  const bo=on?DEV.bo:0;
+  boNote.hidden=!bo; boClear.hidden=!bo;
+  if(bo) boNote.textContent='The board restarted '+bo+(bo===1?' time':' times')+' because its supply voltage dipped (brown-out). On a battery that means the battery is low or cannot deliver the Wi-Fi bursts. Charge it, or set Radio power to Low.';
+  const key=!on?'off'+(find?'f':'')+(lost?'l':''):[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0,lost?1:0].join('|');
   if(key===NET.key) { $('#sum-dev').textContent=devSummary(); renderCert(); return; }
   NET.key=key;
-  if(!on) netMsg('Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
+  if(!on) netMsg(DEV_LIKE?'Not connected to the timer. Tap Connect. This phone has to be on the same Wi-Fi as the timer: its home Wi-Fi, or Beacon-timer. Then it finds the timer again on its own every few seconds.':'Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
+  else if(lost) netMsg('The timer stopped answering. Tap Reconnect. If it keeps failing, check that the timer has power and that this phone is on its Wi-Fi.',true);
   else if(NET.hold){ /* the switch handler wrote the reboot instructions */ }
   else if(i.fail) netMsg('Could not join “'+(i.ssid||'the saved network')+'”. This boot is the Beacon-timer access point. Check the name and password below. The next boot tries again unless Home Wi-Fi is turned off.');
   else if(sta&&DEV.asleep) netMsg('Asleep. Tap Wake, or Asleep at the top. Starting a session also wakes it. The LEDs sleep again after 5 minutes with nothing running, or when you tap Sleep.');
@@ -1440,9 +1549,9 @@ netGo.addEventListener('click',async()=>{
 });
 async function wakeNow(){
   try{
-    const j=await api('/api/wake',{method:'POST',timeout:8000});
-    devApplyState(j,0);
-  }catch(e){ setLink(false,'No reply'); }
+    const j=await hedged('/api/wake',{method:'POST',timeout:8000});
+    DEV.fails=0; devApplyState(j,0);
+  }catch(e){ setLink(false,RECON); }
 }
 sleepBtn.addEventListener('click',async()=>{
   if(S.state==='run'||S.state==='pause'){ netMsg('Stop the timer first.',true); return; }
@@ -1450,7 +1559,25 @@ sleepBtn.addEventListener('click',async()=>{
   catch(e){ netMsg(/409/.test(String(e))?'Stop the timer first.':'Could not reach the timer.',true); }
 });
 wakeBtn.addEventListener('click',wakeNow);
-$('#linkChip').addEventListener('click',()=>{ if(DEV.on&&DEV.asleep) wakeNow(); });
+txSeg.addEventListener('click',async e=>{
+  const b=e.target.closest('button'); if(!b||!NET.info) return;
+  try{ NET.info=await api('/api/power',{method:'POST',body:new URLSearchParams({tx:b.dataset.v}),timeout:8000}); NET.key=''; }
+  catch(err){ netMsg('Could not change the radio power.',true); }
+  renderNet();
+});
+boClear.addEventListener('click',async()=>{
+  try{ NET.info=await api('/api/power',{method:'POST',body:new URLSearchParams({clear:'1'}),timeout:8000}); DEV.bo=0; NET.key=''; }catch(err){}
+  renderNet();
+});
+const linkGo=()=>{ const chip=$('#linkChip'); if(chip.classList.contains('wake')) wakeNow(); else if(chip.classList.contains('act')) devConnect(true); };
+$('#linkChip').addEventListener('click',linkGo);
+$('#linkChip').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); linkGo(); } });
+$('#connBtn').addEventListener('click',()=>devConnect(true));
+/* coming back to the page, or the phone's network coming back, is the moment to look again */
+const rejoin=()=>{ if(!DEV_LIKE||document.visibilityState==='hidden') return; if(!DEV.on) devConnect(false); else if(DEV.fails>=3) devConnect(true); };
+document.addEventListener('visibilitychange',rejoin);
+window.addEventListener('online',rejoin);
+window.addEventListener('pageshow',rejoin);
 renderNet();
 
 /* sketch upload and reboot: real on the device, simulated in this preview */
@@ -1718,5 +1845,5 @@ rebuildAll();
 presetsLoad();
 requestAnimationFrame(frame);
 renderCert();
-devProbe();
+devConnect(false);
 </script><script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(function(){});}</script></body></html>

@@ -55,7 +55,8 @@ through one GPIO anode pin under about 20 mA (or switch the anode with a transis
 
 | File                  | What it is                                                                                  |
 |-----------------------|---------------------------------------------------------------------------------------------|
-| `beacon-timer.ino`    | Soft AP + DNS captive portal, web server, ArduinoOTA, HTTP update, LED PWM, settings in flash |
+| `beacon-timer.ino`    | Soft AP + DNS captive portal, web server, home Wi-Fi, ArduinoOTA, HTTP update, LED PWM, settings in flash |
+| `tlshttps.cpp/.h`     | https://beacon-timer.local: own certificate authority, TLS server on 443 (direct answers, relay for the rest) |
 | `engine.h`            | The timing engine: session plan (sets x repeats), accelerating pulse, transition, set colors, timer states |
 | `json.h`, `config.h`  | Small JSON reader and the settings parser (no external libraries)                            |
 | `ui/app.html`         | The web page (same file as the Claude artifact); `tools/embed_ui.py` turns it into `webui.h` |
@@ -68,13 +69,14 @@ to flash two seconds after the last change.
 
 | Route                     | Use                                                                     |
 |---------------------------|-------------------------------------------------------------------------|
-| `GET /api/state`          | `{app, ver, s, t, total, rev, ota, up}` — `s` is idle / run / pause / preview / done / stopped |
+| `GET /api/state`          | `{app, ver, s, t, total, rev, ota, up, sleep, net, fail, rst, bo, heap, rssi}` — `s` is idle / run / pause / preview / done / stopped; `rst` is the last reset reason, `bo` the brown-out count, `heap` free RAM, `rssi` the home-Wi-Fi signal |
 | `POST /api/cmd?c=start&t=` | `c` = start (optional `t` seconds), pause, stop, reset, seek (needs `t`) |
 | `GET/POST /api/config`    | The settings JSON (POST body is plain text); `rev` changes when it does |
 | `GET/POST /api/presets`   | The saved-timer list (one JSON array, up to 32 kB), kept in LittleFS      |
 | `POST /api/reboot`        | Restart                                                                 |
 | `GET/POST /api/net`       | Home Wi-Fi vs access point. GET does not return the password. POST `mode=sta` or `mode=ap` (optional `ssid`, `pass`) and the board reboots |
 | `POST /api/wake`          | Leave modem sleep (home Wi-Fi only)                                     |
+| `POST /api/power`         | `tx` = 0 full, 1 reduced (default), 2 low radio power, applied at once; `clear` resets the brown-out count. Returns the `/api/net` JSON |
 | `POST /api/sleep`         | Modem sleep now, if no session is running or paused                     |
 | `POST /update`            | Multipart firmware upload (field `firmware`), reboots when done         |
 
@@ -97,7 +99,17 @@ The timer in the page runs on the phone either way. The board is the LEDs, and t
 
 Settings > Device > **Network**. The Wi-Fi name and password are the ones under **Online update** (2.4 GHz only). Turn on **Home Wi-Fi** and tap **Reboot** twice. The board joins that network, serves this same page at `http://beacon-timer.local` and, after the certificate above is trusted, at `https://beacon-timer.local`. The address is shown in Device.
 
-On that network the board stays fully awake while a session is running or paused. Five minutes after the session stops, or when **Sleep** is tapped, the LEDs go off and the Wi-Fi radio sleeps between beacons. It is still associated, so **Wake** (or **Asleep** in the header, or starting a session) reaches it and brings the LEDs back. The phone has to be on that same network.
+On that network the board stays fully awake while a session is running or paused. Five minutes after the session stops, or when **Sleep** is tapped, the LEDs go off and the Wi-Fi radio goes into light modem sleep: it wakes for every router beacon that announces broadcast traffic, so the name `beacon-timer.local` still resolves and the board still answers. **Wake** (or **Asleep** in the header, or starting a session) brings the LEDs back. The phone has to be on that same network.
+
+### Finding the board
+
+A page served by the board (its names or a private address) looks for the board until it finds it: every few seconds, and at once when the page comes back to the front or the phone's network returns. The header shows **Connect** while it has not found it and **Reconnect** if the board stopped answering; tapping either (or the **Connect** button in Settings > Device > Network) sends a wake and a status request right away. Each lookup is started again after 0.7 s (2.4 s over https) if the first try has not answered, so one lost packet no longer costs seconds. A page from anywhere else (GitHub Pages, the Claude artifact) never searches and shows **Standalone**.
+
+On the board: the join picks the strongest access point with the saved name, retries once, and is watched afterwards (the board asks to reconnect if the link stays down). Every 90 s, and after each reconnect, it announces `beacon-timer.local` again. A connection that has sent nothing is dropped after 0.4 s when another is waiting; Safari opens spare ones, and each used to stall the page for 5 s. Over https the page, icons, manifest, service worker and status poll are answered directly by the TLS server; only other calls are relayed to port 80.
+
+### Power and battery
+
+The board runs at 160 MHz and starts with **Radio power: Reduced** (13 dBm), which lowers the supply current peaks of the radio. Settings > Device > Network > **Radio power** changes it at once (Full 19.5 dBm, Reduced 13, Low 8.5); use Full if the board is far from the router. Device also shows the last reset reason, the signal strength and free memory. If the board resets because the supply dipped (**brown-out**), the count and a note appear there. On a lithium cell that points to a low battery, or a regulator/diode path that cannot deliver the Wi-Fi bursts; try a charged cell, Radio power Low, or a larger capacitor (100 µF or more) across 3V3 and GND.
 
 Turn **Home Wi-Fi** off and reboot to return to the **Beacon-timer** access point. That mode does not sleep.
 
@@ -119,6 +131,11 @@ pulse train; the pulses keep running on the window clock. Both times are in Sett
   pulse. Before that the light pulses slowly (*Cycle*, *Dim*), one color after another, each color getting an equal share
   of the time; the final stretch then starts again at the first color. A 10 min load with 4 colors is 4 shares of 2:22.5,
   then the last 30 s. Loads of 30 s or less behave as before. *Marks* adds an optional double flash every N seconds.
+- **Final stretch of a long load** (Settings > Load > Final stretch). *Blink ramp* (default) keeps the slow pulse going into the last
+  *Final* seconds and speeds it up slightly (about 0.25 to 0.6 Hz with the default cycle) until *Blink* seconds (15) are left. Then it
+  becomes a soft-edged blink with a longer on-time (about 65 %) whose rate climbs to *Blink to* (3 Hz), capped by Max Hz. It is one
+  continuous waveform, so nothing jumps at the hand-over. The colors in the final stretch still start again at the first color.
+  *Pulse train* is the earlier behavior: the normal accelerating pulse sequence. Loads of 30 s or less are not affected.
 
 ## Saved timers
 

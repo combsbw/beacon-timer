@@ -49,6 +49,9 @@ inline void cfgProfileNum(Profile& p, const char* k, float v) {
   else if (!strcmp(k, "longCycle")) p.longCycle = v;
   else if (!strcmp(k, "longDim")) p.longDim = v;
   else if (!strcmp(k, "markEvery")) p.markEvery = v;
+  else if (!strcmp(k, "finalStyle")) p.finalStyle = (int)floorf(v + 0.5f);
+  else if (!strcmp(k, "blinkSec")) p.blinkSec = v;
+  else if (!strcmp(k, "blinkHz")) p.blinkHz = v;
   else if (!strcmp(k, "fade")) p.fade = v;
   else if (!strcmp(k, "breath")) p.breath = v;
   else if (!strcmp(k, "tail")) p.tail = v;
@@ -118,6 +121,7 @@ inline void cfgSanitizeProfile(Profile& p) {
   p.soft0 = clampf(p.soft0, 0.f, 100.f); p.soft1 = clampf(p.soft1, 0.f, 100.f);
   p.finalSec = clampf(p.finalSec, 10.f, 120.f); p.longCycle = clampf(p.longCycle, 2.f, 20.f); p.longDim = clampf(p.longDim, 0.f, 60.f);
   p.markEvery = p.markEvery <= 0.f ? 0.f : clampf(p.markEvery, 10.f, 600.f);
+  p.finalStyle = p.finalStyle == 1 ? 1 : 0; p.blinkSec = clampf(p.blinkSec, 5.f, 60.f); p.blinkHz = clampf(p.blinkHz, 1.f, 7.f);
   p.solid = clampf(p.solid, 0.f, 10.f); p.fade = clampf(p.fade, 0.f, 5.f);
   p.glow = clampf(p.glow, 0.f, 100.f); p.blend = clampf(p.blend, 0.f, 100.f);
   p.breath = clampf(p.breath, 0.5f, 20.f); p.tail = clampf(p.tail, 0.5f, 60.f);
