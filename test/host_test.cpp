@@ -19,7 +19,7 @@ static std::string slurp(const char* path) {
   return s;
 }
 
-static int dump(const char* path) {
+static int dump(const char* path, int samples) {
   std::string js = slurp(path);
   Config c; bool pinsOk = true;
   if (!cfgFromJson(js.c_str(), js.size(), c, &pinsOk)) { printf("PARSE FAIL\n"); return 1; }
@@ -31,8 +31,8 @@ static int dump(const char* path) {
   for (int i = 0; i < trackN(c); i++) printf("C %d %.3f %.3f %.3f\n", i, sc[i].r, sc[i].g, sc[i].b);
   for (int i = 0; i < pl.n; i++) {
     Win w = winAt(pl, i);
-    for (int k = 0; k < 64; k++) {
-      double local = (double)w.len * (k + 0.5) / 64.0;
+    for (int k = 0; k < samples; k++) {
+      double local = (double)w.len * (k + 0.5) / samples;
       Led a = led1(c, w, local), b = led2(c, w, sc);
       printf("S %d %d %.4f %.4f %.4f %.5f %.3f %.3f %.3f %.3f\n", i, k, a.c.r, a.c.g, a.c.b, a.b, b.c.r, b.c.g, b.c.b, b.b);
     }
@@ -160,11 +160,57 @@ static int stateTest() {
     CHECK(f.c.r == lc.load.colors[0].r && f.c.g == lc.load.colors[0].g);
     // the slow pulse: cycle 4 s, peak at the start of each cycle, dim level 15 %
     CHECK(fabsf(led1(lc, w, 8.0).b - 1.f) < 1e-5f && fabsf(led1(lc, w, 10.0).b - 0.15f) < 1e-5f && led1(lc, w, 9.0).b > 0.4f);
-    // the last 30 s are exactly a plain 30 s load
+    // with the pulse-train style the last 30 s are exactly a plain 30 s load
     Win w30{W_LOAD, 1, 1, 30.0, 0.0};
+    Config pc = lc; pc.load.finalStyle = 1;
+    for (double t = 0.3; t < 30.0; t += 1.7) {
+      Led p1 = led1(pc, w, 570.0 + t), p2 = led1(pc, w30, t);
+      CHECK(fabsf(p1.b - p2.b) < 1e-6f && p1.c.r == p2.c.r && p1.c.g == p2.c.g && p1.c.b == p2.c.b);
+    }
+    // blink ramp (default): colors are the same as the plain sequence, the brightness is the new envelope
     for (double t = 0.3; t < 30.0; t += 1.7) {
       Led p1 = led1(lc, w, 570.0 + t), p2 = led1(lc, w30, t);
-      CHECK(fabsf(p1.b - p2.b) < 1e-6f && p1.c.r == p2.c.r && p1.c.g == p2.c.g && p1.c.b == p2.c.b);
+      CHECK(p1.c.r == p2.c.r && p1.c.g == p2.c.g && p1.c.b == p2.c.b);
+    }
+    {
+      const double head = 570.0;
+      // no jump where the slow pulse hands over to the final stretch
+      CHECK(fabsf(led1(lc, w, head - 0.001).b - led1(lc, w, head + 0.001).b) < 0.01f);
+      // bounded, and soft: no step bigger than 0.05 between samples 2 ms apart, anywhere in the final stretch
+      float lo = 9.f, hi = -9.f, prev = led1(lc, w, head).b, worst = 0.f;
+      for (double t = head; t < 600.0; t += 0.002) {
+        float b = led1(lc, w, t).b;
+        if (b < lo) lo = b;
+        if (b > hi) hi = b;
+        if (fabsf(b - prev) > worst) worst = fabsf(b - prev);
+        prev = b;
+      }
+      CHECK(lo >= 0.f && hi <= 1.f + 1e-6f && hi > 0.99f && lo < 0.05f);
+      CHECK(worst < 0.05f);
+      // pulses per 3 s block: a slight increase over the first 15 s, then 1 -> 3 Hz blinks
+      auto peaks = [&](double a, double z) {
+        int n = 0; float p2 = 0, p1 = 0;
+        for (double t = a; t < z; t += 0.004) {
+          float b = led1(lc, w, t).b;
+          if (p1 > p2 && p1 >= b && p1 > 0.9f) n++;
+          p2 = p1; p1 = b;
+        }
+        return n;
+      };
+      int early = peaks(570.0, 585.0), late = peaks(585.0, 600.0);
+      CHECK(early >= 7 && early <= 12);                                  // about 0.25 -> 0.6 Hz over 15 s
+      CHECK(late >= 18 && late <= 30);                                   // about 0.6 -> 3 Hz over 15 s, accelerating
+      int lastSec = peaks(598.0, 600.0);
+      CHECK(lastSec >= 5 && lastSec <= 7);                               // near 3 Hz at the end
+      // longer duty: at the end the light is above half brightness for more than half of each cycle
+      int on = 0, tot = 0;
+      for (double t = 597.0; t < 600.0; t += 0.002) { tot++; if (led1(lc, w, t).b > 0.5f) on++; }
+      CHECK(on * 100 / tot > 55);
+      // the rate cap still applies
+      Config mc = lc; mc.maxHz = 2.f;
+      int capped = 0; float q2 = 0, q1 = 0;
+      for (double t = 598.0; t < 600.0; t += 0.004) { float b = led1(mc, w, t).b; if (q1 > q2 && q1 >= b && q1 > 0.9f) capped++; q2 = q1; q1 = b; }
+      CHECK(capped >= 3 && capped <= 5);
     }
     // a load of 30 s or less is untouched; the final length is adjustable
     Win w20{W_LOAD, 1, 1, 20.0, 0.0};
@@ -260,7 +306,7 @@ static int stateTest() {
 }
 
 int main(int argc, char** argv) {
-  if (argc >= 3 && !strcmp(argv[1], "dump")) return dump(argv[2]);
+  if (argc >= 3 && !strcmp(argv[1], "dump")) return dump(argv[2], argc >= 4 ? atoi(argv[3]) : 64);
   if (argc >= 2 && !strcmp(argv[1], "state")) return stateTest();
   fprintf(stderr, "usage: host_test dump config.json | state\n");
   return 2;

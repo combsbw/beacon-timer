@@ -5,8 +5,9 @@
  *   Wi-Fi   : open soft AP "Beacon-timer"  ->  http://192.168.4.1  (captive portal opens the page by itself)
  *             or, after Device > Network, the home network saved for online update -> http://beacon-timer.local
  *             and https://beacon-timer.local once the phone trusts the board's certificate (tlshttps.cpp)
- *   Sleep   : home-network mode only. LEDs off and Wi-Fi modem sleep after 5 min idle, or when the page asks.
- *             A wake request (or starting a session) brings the radio and LEDs back. The AP never sleeps.
+ *   Sleep   : home-network mode only. LEDs off and light Wi-Fi modem sleep (wakes for every DTIM beacon, so the name
+ *             beacon-timer.local still resolves) after 5 min idle, or when the page asks. A wake request (or starting
+ *             a session) brings the LEDs back. The AP never sleeps.
  *   Update  : ArduinoOTA on port 3232 ("make ota") and an HTTP upload from the Settings > Device page
  *
  * The timer runs on the device, so it keeps going with no phone connected. The web page is the control panel:
@@ -35,6 +36,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_system.h"
 
 #include "engine.h"
 #include "json.h"
@@ -44,9 +46,11 @@
 #include "ghupdate.h"
 #include "tlshttps.h"
 
-#define FW_VERSION "0.5.2"
+#define FW_VERSION "0.6.0"
 #define IDLE_SLEEP_MS (5UL * 60UL * 1000UL)   // home-network mode: sleep this long after the session stops
-#define STA_JOIN_MS 15000
+#define STA_JOIN_MS 12000                      // per attempt; the board tries twice before it gives up and starts the access point
+#define IDLE_FIRST_MS 400                      // a new connection that has sent nothing is dropped after this if another one is waiting
+#define MDNS_POKE_MS 90000UL                   // re-announce beacon-timer.local this often while on the home network
 #define AP_SSID "Beacon-timer"          // open network, no password
 #define AP_CHANNEL 6
 #define AP_MAX_CLIENTS 4
@@ -125,6 +129,11 @@ static bool staFailed = false;             // wanted the home network, join fail
 static bool dnsOn = false;
 static uint32_t idleSinceMs = 0;
 static TaskHandle_t ledTaskHandle = nullptr;
+static volatile bool gotIpFlag = false;        // set by the Wi-Fi event task; the loop re-announces the name
+static uint32_t mdnsPokeAt = 0;
+static uint8_t txLevel = 1;                    // 0 full (19.5 dBm), 1 reduced (13 dBm), 2 low (8.5 dBm)
+static uint32_t boCount = 0;                   // brown-out resets seen (counted at boot)
+static const char* rstName = "";
 // Online update from GitHub: phase 1 joining Wi-Fi, 2 clock, 3 finding the release, 4 downloading, 5 done, 6 failed (0 = idle)
 static volatile uint8_t updPhase = 0, updPct = 0, updErr = 0;
 static volatile uint32_t updStartAt = 0;
@@ -135,7 +144,23 @@ static uint32_t cfgRev = 1;
 static bool cfgDirty = false;
 static uint32_t cfgDirtyAt = 0;
 
-static WebServer server(80);
+// The stock WebServer serves one connection at a time and waits up to 5 s for it to send its request. Safari opens spare
+// connections and sends nothing on them, so every spare one stalls the page for seconds. This drops a silent connection after
+// IDLE_FIRST_MS, but only when another one is queued behind it.
+class BeaconServer : public WebServer {
+ public:
+  explicit BeaconServer(int port) : WebServer(port) {}
+  void serve() {
+    if (_currentStatus == HC_WAIT_READ && _currentClient.connected() && !_currentClient.available() &&
+        (millis() - _statusChange) > IDLE_FIRST_MS && _server.hasClient()) {
+      _currentClient.stop();
+      _currentClient = WiFiClient();
+      _currentStatus = HC_NONE;
+    }
+    handleClient();
+  }
+};
+static BeaconServer server(80);
 #if CAPTIVE_PORTAL
 static DNSServer dns;
 #endif
@@ -188,7 +213,7 @@ static void leaveSleep() {
 static void enterSleep() {
   if (!radioSta || powerSave || otaBusy || updPhase) return;
   powerSave = true;
-  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);       // radio stays associated and wakes when a packet arrives
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);       // wakes for every DTIM beacon: multicast (the name lookup) and queued packets still arrive
 }
 
 static void noteActivity() {
@@ -280,17 +305,24 @@ static void sendJson(int code, const char* body) {
   server.send(code, "application/json", body);
 }
 
-static void sendState() {
+static int stateJson(char* buf, size_t cap) {
   int64_t now = esp_timer_get_time();
-  char buf[240];
   LOCK();
   double t = eng.position(now);
   if (t > eng.plan.total) t = eng.plan.total;
-  snprintf(buf, sizeof buf,
-           "{\"app\":\"beacon\",\"ver\":\"%s\",\"s\":\"%s\",\"t\":%.3f,\"total\":%.1f,\"rev\":%lu,\"ota\":%d,\"up\":%lu,\"sleep\":%d,\"net\":\"%s\",\"fail\":%d}",
+  int n = snprintf(buf, cap,
+           "{\"app\":\"beacon\",\"ver\":\"%s\",\"s\":\"%s\",\"t\":%.3f,\"total\":%.1f,\"rev\":%lu,\"ota\":%d,\"up\":%lu,\"sleep\":%d,\"net\":\"%s\",\"fail\":%d,"
+           "\"rst\":\"%s\",\"bo\":%lu,\"heap\":%lu,\"rssi\":%d}",
            FW_VERSION, bc::stateName(eng.state), t, (double)eng.plan.total, (unsigned long)cfgRev, otaBusy ? 1 : 0,
-           (unsigned long)(millis() / 1000), powerSave ? 1 : 0, radioSta ? "sta" : "ap", staFailed ? 1 : 0);
+           (unsigned long)(millis() / 1000), powerSave ? 1 : 0, radioSta ? "sta" : "ap", staFailed ? 1 : 0,
+           rstName, (unsigned long)boCount, (unsigned long)ESP.getFreeHeap(), radioSta ? (int)WiFi.RSSI() : 0);
   UNLOCK();
+  return (n > 0 && (size_t)n < cap) ? n : -1;
+}
+
+static void sendState() {
+  char buf[360];
+  if (stateJson(buf, sizeof buf) < 0) { sendJson(500, "{\"ok\":false}"); return; }
   sendJson(200, buf);
 }
 
@@ -365,19 +397,21 @@ static void sendIcon(const uint8_t* data, size_t len) {
 }
 static void handleIcon180() { sendIcon(ICON_180, ICON_180_LEN); }
 static void handleIcon192() { sendIcon(ICON_192, ICON_192_LEN); }
+static const char MANIFEST_JSON[] =
+  "{\"name\":\"Beacon Timer\",\"short_name\":\"Beacon\",\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\","
+  "\"orientation\":\"any\",\"background_color\":\"#0b0e10\",\"theme_color\":\"#0b0e10\","
+  "\"icons\":[{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\",\"purpose\":\"any\"},"
+  "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}";
 static void handleManifest() {
   server.sendHeader("Cache-Control", "public, max-age=86400");
-  server.send(200, "application/manifest+json",
-              "{\"name\":\"Beacon Timer\",\"short_name\":\"Beacon\",\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\","
-              "\"orientation\":\"any\",\"background_color\":\"#0b0e10\",\"theme_color\":\"#0b0e10\","
-              "\"icons\":[{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\",\"purpose\":\"any\"},"
-              "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}");
+  server.send(200, "application/manifest+json", MANIFEST_JSON);
 }
 
-// The home-screen icon loads this when the board is off. API calls stay on the network.
-static void handleSw() {
-  char body[2200];
-  snprintf(body, sizeof body,
+// The home-screen icon loads this when the board is off. API calls stay on the network. Built once at boot; port 80 and
+// port 443 both serve this same text.
+static char swBody[2200];
+static void buildSw() {
+  snprintf(swBody, sizeof swBody,
     "var CACHE='%s';\n"
     "var SHELL=['/','/manifest.webmanifest','/apple-touch-icon.png','/icon-192.png'];\n"
     "self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});\n"
@@ -393,8 +427,10 @@ static void handleSw() {
     "var net=fetch(e.request).then(function(res){if(res&&res.ok&&(shell||e.request.mode==='navigate')){var copy=res.clone();caches.open(CACHE).then(function(c){c.put(e.request.mode==='navigate'?'/':e.request,copy);});}return res;}).catch(function(){return hit||caches.match('/');});\n"
     "return hit||net;}));});\n",
     WEBUI_CACHE_ID);
+}
+static void handleSw() {
   server.sendHeader("Cache-Control", "no-cache");
-  server.send(200, "application/javascript", body);
+  server.send(200, "application/javascript", swBody);
 }
 
 // iPhone installs this from http:// first. Trust is a separate switch the page explains.
@@ -706,8 +742,29 @@ static void handleNetInfo() {
   String r = String("{\"wanted\":\"") + wanted + "\",\"radio\":\"" + (radioSta ? "sta" : "ap") +
              "\",\"fail\":" + (staFailed ? "true" : "false") + ",\"ssid\":\"" + jsonEsc(ssid) +
              "\",\"hasPass\":" + (hasPass ? "true" : "false") + ",\"ip\":\"" + ip +
-             "\",\"host\":\"" HOST_NAME "\",\"sleep\":" + (powerSave ? "true" : "false") + "}";
+             "\",\"host\":\"" HOST_NAME "\",\"sleep\":" + (powerSave ? "true" : "false") + ",\"tx\":" + String((int)txLevel) +
+             ",\"bo\":" + String((unsigned long)boCount) + ",\"rst\":\"" + rstName + "\"}";
   sendJson(200, r.c_str());
+}
+
+static void applyTx() {
+  static const wifi_power_t LV[3] = {WIFI_POWER_19_5dBm, WIFI_POWER_13dBm, WIFI_POWER_8_5dBm};
+  WiFi.setTxPower(LV[txLevel > 2 ? 1 : txLevel]);
+}
+
+// Radio power and the brown-out counter. Fields (any subset): tx = 0 full, 1 reduced, 2 low (applied at once, no reboot);
+// clear = 1 resets the brown-out counter.
+static void handlePower() {
+  if (server.hasArg("tx")) {
+    int v = server.arg("tx").toInt();
+    if (v < 0 || v > 2) { sendJson(400, "{\"ok\":false,\"err\":\"tx\"}"); return; }
+    txLevel = (uint8_t)v;
+    prefs.putUChar("wTx", txLevel);
+    applyTx();
+  }
+  if (server.hasArg("clear")) { boCount = 0; prefs.putUInt("bo", 0); }
+  noteActivity();
+  handleNetInfo();
 }
 
 // mode=sta saves the shared Wi-Fi name and password (the same ones online update uses) and reboots into station mode.
@@ -751,9 +808,16 @@ static bool startStation() {
   joinPhase = 1;
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOST_NAME);
-  WiFi.begin(ssid.c_str(), pass.c_str());
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - t0) < STA_JOIN_MS) delay(100);
+  WiFi.setAutoReconnect(true);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);          // look at every access point with this name ...
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);      // ... and join the strongest (the default joins the first one it hears)
+  applyTx();
+  for (int attempt = 0; attempt < 2 && WiFi.status() != WL_CONNECTED; attempt++) {
+    if (attempt) { WiFi.disconnect(false, false); delay(300); }
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - t0) < STA_JOIN_MS) delay(100);
+  }
   joinPhase = 0;
   if (WiFi.status() != WL_CONNECTED) {
     Serial.printf("home Wi-Fi join failed for \"%s\"\n", ssid.c_str());
@@ -763,8 +827,30 @@ static bool startStation() {
     return false;
   }
   esp_wifi_set_ps(WIFI_PS_NONE);
-  Serial.printf("home Wi-Fi \"%s\"  http://%s  http://%s.local\n", ssid.c_str(), WiFi.localIP().toString().c_str(), HOST_NAME);
+  Serial.printf("home Wi-Fi \"%s\"  %d dBm  http://%s  http://%s.local\n", ssid.c_str(), (int)WiFi.RSSI(), WiFi.localIP().toString().c_str(), HOST_NAME);
   return true;
+}
+
+// On the home network: if the link drops and the driver's own reconnect has not brought it back, ask again.
+static void staWatch() {
+  if (!radioSta || otaBusy || updPhase) return;
+  static uint32_t lastChk = 0, downSince = 0;
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastChk) < 2000) return;
+  lastChk = now;
+  if (WiFi.status() == WL_CONNECTED) { downSince = 0; return; }
+  if (!downSince) downSince = now ? now : 1;
+  else if ((uint32_t)(now - downSince) > 8000) { WiFi.reconnect(); downSince = now; }
+}
+
+// Announce beacon-timer.local again (a changed TXT record makes the responder send an unsolicited announcement), so a phone's
+// cached answer stays fresh and a lookup after a long idle is answered from its cache.
+static void mdnsPoke() {
+  static uint32_t n = 0;
+  char v[12];
+  snprintf(v, sizeof v, "%lu", (unsigned long)++n);
+  const char* val = v;                  // const char* on every argument: the char* overload would make the call ambiguous
+  MDNS.addServiceTxt("http", "tcp", "n", val);
 }
 
 static void startAp() {
@@ -772,6 +858,7 @@ static void startAp() {
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
   WiFi.softAPsetHostname(HOST_NAME);
   WiFi.softAP(AP_SSID, nullptr, AP_CHANNEL, 0, AP_MAX_CLIENTS);       // no password
+  applyTx();
   esp_wifi_set_ps(WIFI_PS_NONE);
 #if CAPTIVE_PORTAL
   dns.start(53, "*", IPAddress(192, 168, 4, 1));
@@ -780,17 +867,64 @@ static void startAp() {
 }
 
 // ---- setup / loop -------------------------------------------------------------------------------------------------
+static const char* resetName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "restart";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "wake";
+    case ESP_RST_EXT: return "button";
+    default: return "other";
+  }
+}
+
+static void onGotIp(arduino_event_id_t) { gotIpFlag = true; }
+
+// Everything on port 443 that does not need the page on port 80: the page, icons, manifest, service worker, and the status poll.
+// Answering these directly (no relay, no copy in RAM) keeps each TLS connection short and its memory small.
+static int jsonState(char* buf, size_t cap) { return stateJson(buf, cap); }
+static int jsonWake(char* buf, size_t cap) { noteActivity(); return stateJson(buf, cap); }
+static const TlsJson TLS_JSON[] = {{"/api/state", 0, jsonState}, {"/api/wake", 1, jsonWake}};
+static TlsAsset tlsAssets[12];
+
+static void registerTlsRoutes() {
+  size_t n = 0;
+  const char* pngCache = "public, max-age=86400";
+  tlsAssets[n++] = TlsAsset{"/", "text/html; charset=utf-8", (const uint8_t*)WEBUI_GZ, WEBUI_GZ_LEN, 1, "no-cache"};
+  static const char* const ICON180[] = {"/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/apple-touch-icon-180x180.png",
+                                         "/apple-touch-icon-180x180-precomposed.png", "/apple-touch-icon-152x152.png"};
+  for (const char* u : ICON180) tlsAssets[n++] = TlsAsset{u, "image/png", ICON_180, ICON_180_LEN, 0, pngCache};
+  tlsAssets[n++] = TlsAsset{"/icon-192.png", "image/png", ICON_192, ICON_192_LEN, 0, pngCache};
+  tlsAssets[n++] = TlsAsset{"/favicon.ico", "image/png", ICON_192, ICON_192_LEN, 0, pngCache};
+  tlsAssets[n++] = TlsAsset{"/manifest.webmanifest", "application/manifest+json", (const uint8_t*)MANIFEST_JSON, sizeof MANIFEST_JSON - 1, 0, pngCache};
+  tlsAssets[n++] = TlsAsset{"/sw.js", "application/javascript", (const uint8_t*)swBody, strlen(swBody), 0, "no-cache"};
+  tlsRoutes(tlsAssets, n, TLS_JSON, sizeof TLS_JSON / sizeof TLS_JSON[0]);
+}
+
 void setup() {
+  setCpuFrequencyMhz(160);              // Wi-Fi and the LEDs do not need 240 MHz; this trims the supply current
   Serial.begin(115200);                 // USB CDC (CDC On Boot); does not wait for a terminal
+  delay(150);                           // let a battery supply settle before the radio starts
   engMtx = xSemaphoreCreateMutex();
 
   prefs.begin("beacon", false);
+  txLevel = prefs.getUChar("wTx", 1);
+  if (txLevel > 2) txLevel = 1;
+  esp_reset_reason_t rr = esp_reset_reason();
+  rstName = resetName(rr);
+  boCount = prefs.getUInt("bo", 0);
+  if (rr == ESP_RST_BROWNOUT) { boCount++; prefs.putUInt("bo", boCount); }
   hw[0].live = hw[1].live = false;
   fsOk = LittleFS.begin(true);          // formats the storage on the very first boot
   cfgLoad();                            // also sets up the LED pins: common pin held HIGH (anode) so the LEDs start dark
   xTaskCreatePinnedToCore(ledTask, "led", 6144, nullptr, 5, &ledTaskHandle, 1);
 
   WiFi.persistent(false);
+  WiFi.onEvent(onGotIp, ARDUINO_EVENT_WIFI_STA_GOT_IP);
   String wanted = prefs.getString("wMode", "ap");
   if (wanted == "sta") {
     radioSta = startStation();
@@ -800,10 +934,15 @@ void setup() {
   else if (MDNS.begin(HOST_NAME)) MDNS.addService("http", "tcp", 80);
   if (fsOk) tlsPrepare();
   idleSinceMs = millis();
+  mdnsPokeAt = millis() + MDNS_POKE_MS;
+  buildSw();
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/apple-touch-icon.png", HTTP_GET, handleIcon180);
   server.on("/apple-touch-icon-precomposed.png", HTTP_GET, handleIcon180);
+  server.on("/apple-touch-icon-180x180.png", HTTP_GET, handleIcon180);
+  server.on("/apple-touch-icon-180x180-precomposed.png", HTTP_GET, handleIcon180);
+  server.on("/apple-touch-icon-152x152.png", HTTP_GET, handleIcon180);
   server.on("/icon-192.png", HTTP_GET, handleIcon192);
   server.on("/favicon.ico", HTTP_GET, handleIcon192);
   server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
@@ -812,6 +951,7 @@ void setup() {
   server.on("/api/state", HTTP_GET, sendState);
   server.on("/api/net", HTTP_GET, handleNetInfo);
   server.on("/api/net", HTTP_POST, handleNetPost);
+  server.on("/api/power", HTTP_POST, handlePower);
   server.on("/api/wake", HTTP_POST, handleWake);
   server.on("/api/sleep", HTTP_POST, handleSleep);
   server.on("/api/update", HTTP_GET, handleUpdInfo);
@@ -826,6 +966,7 @@ void setup() {
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateData);
   server.onNotFound(handleNotFound);
   server.begin();
+  registerTlsRoutes();
   if (radioSta && tlsStart()) MDNS.addService("https", "tcp", 443);
 
   ArduinoOTA.setHostname(HOST_NAME);
@@ -835,7 +976,7 @@ void setup() {
   ArduinoOTA.onError([](ota_error_t e) { otaBusy = false; Serial.printf("OTA error %u\n", (unsigned)e); });
   ArduinoOTA.begin();
 
-  Serial.printf("Beacon Timer %s\n", FW_VERSION);
+  Serial.printf("Beacon Timer %s  reset: %s  brown-outs: %lu  free heap %lu\n", FW_VERSION, rstName, (unsigned long)boCount, (unsigned long)ESP.getFreeHeap());
   if (radioSta) Serial.printf("STA http://%s  http://%s.local  https://%s.local  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, HOST_NAME, OTA_PORT);
   else Serial.printf("AP \"%s\" (open)  http://%s  OTA port %d%s\n", AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_PORT, staFailed ? "  (home Wi-Fi join failed)" : "");
 }
@@ -844,9 +985,15 @@ void loop() {
 #if CAPTIVE_PORTAL
   if (dnsOn) dns.processNextRequest();
 #endif
-  server.handleClient();
+  server.serve();
   ArduinoOTA.handle();
   refreshIdle();
+  staWatch();
+  if (radioSta && (gotIpFlag || (int32_t)(millis() - mdnsPokeAt) >= 0)) {
+    gotIpFlag = false;
+    mdnsPokeAt = millis() + MDNS_POKE_MS;
+    mdnsPoke();
+  }
 
   if (updStartAt && (int32_t)(millis() - updStartAt) >= 0) { updStartAt = 0; runWebUpdate(); }   // does not return: it restarts
   if (cfgDirty && millis() - cfgDirtyAt > 2000) cfgSaveNow();

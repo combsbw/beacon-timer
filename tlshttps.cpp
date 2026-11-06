@@ -262,7 +262,50 @@ static bool headerIs(const char* name, const char* want) {
   return *name == 0 && *want == 0;
 }
 
+static const TlsAsset* gAssets = nullptr;
+static size_t gNAssets = 0;
+static const TlsJson* gJson = nullptr;
+static size_t gNJson = 0;
+
+void tlsRoutes(const TlsAsset* assets, size_t nAssets, const TlsJson* json, size_t nJson) {
+  gAssets = assets; gNAssets = nAssets; gJson = json; gNJson = nJson;
+}
+
+static bool uriIs(const char* uri, const char* want) {
+  size_t n = strlen(want);
+  return strncmp(uri, want, n) == 0 && (uri[n] == 0 || uri[n] == '?');
+}
+
+// ESP_ERR_NOT_FOUND = not one of ours, relay it. Anything else is the result of answering it here.
+static esp_err_t answerHere(httpd_req_t* req) {
+  if (!req->uri) return ESP_ERR_NOT_FOUND;
+  if (req->method == HTTP_GET || req->method == HTTP_HEAD) {
+    for (size_t i = 0; i < gNAssets; i++) {
+      const TlsAsset& a = gAssets[i];
+      if (!uriIs(req->uri, a.uri)) continue;
+      httpd_resp_set_type(req, a.type);
+      if (a.gzip) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+      httpd_resp_set_hdr(req, "Cache-Control", a.cache);
+      /* One complete response with Content-Length: the home-screen icon fetch only keeps pictures that have one. */
+      return httpd_resp_send(req, req->method == HTTP_HEAD ? nullptr : (const char*)a.data, req->method == HTTP_HEAD ? 0 : (ssize_t)a.len);
+    }
+  }
+  for (size_t i = 0; i < gNJson; i++) {
+    const TlsJson& j = gJson[i];
+    if ((j.post ? HTTP_POST : HTTP_GET) != req->method || !uriIs(req->uri, j.uri)) continue;
+    char buf[400];
+    int n = j.fn(buf, sizeof buf);
+    if (n < 0) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "state");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, buf, n);
+  }
+  return ESP_ERR_NOT_FOUND;
+}
+
 static esp_err_t proxyReq(httpd_req_t* req) {
+  esp_err_t here = answerHere(req);
+  if (here != ESP_ERR_NOT_FOUND) return here;
   const char* method = methodName(req->method);
   if (!method || !req->uri) return httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED, "method");
 
@@ -454,12 +497,12 @@ bool tlsStart() {
   {
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
     conf.httpd.uri_match_fn = matchAny;
-    conf.httpd.max_open_sockets = 2;
+    conf.httpd.max_open_sockets = 3;       /* each TLS connection holds about 40 kB of RAM (16 kB in, 16 kB out) */
     conf.httpd.max_uri_handlers = 8;
     conf.httpd.stack_size = 20480;
     conf.httpd.ctrl_port = 32769;
-    conf.httpd.recv_wait_timeout = 15;
-    conf.httpd.send_wait_timeout = 15;
+    conf.httpd.recv_wait_timeout = 5;      /* one silent connection holds up every other until this runs out */
+    conf.httpd.send_wait_timeout = 5;
     conf.httpd.lru_purge_enable = true;
     conf.cacert_pem = (const uint8_t*)crt;
     conf.cacert_len = strlen(crt) + 1;
