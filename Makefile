@@ -58,9 +58,6 @@ deps:
 webui.h: ui/app.html tools/embed_ui.py
 	python3 tools/embed_ui.py
 
-icons.h: icons/apple-touch-icon.png icons/icon-192.png tools/embed_icons.py
-	python3 tools/embed_icons.py
-
 # GitHub Pages site (docs/ on main). Relative paths, so it works at /<repo>/.
 docs/index.html: ui/app.html icons/apple-touch-icon.png icons/icon-192.png tools/build_pages.py
 	python3 tools/build_pages.py
@@ -73,7 +70,7 @@ ui: webui.h pages
 certwindow.h: tools/cert_window.py
 	python3 tools/cert_window.py
 
-build: webui.h icons.h certwindow.h
+build: webui.h certwindow.h
 	$(CLI) compile --fqbn $(FQBN) --output-dir $(BUILD) .
 
 flash: build

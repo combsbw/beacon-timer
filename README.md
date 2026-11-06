@@ -4,7 +4,8 @@ Interval timer with two RGB LEDs (Timer and Set) for the **ESP32-S3 Super Mini**
 joins the open Wi-Fi network **Beacon-timer** and opens `http://192.168.4.1` (a captive portal does it automatically),
 or, after Settings > Device > Network is set to home Wi-Fi, opens `http://beacon-timer.local` on that network. The page
 is the control panel: Start / Pause / Stop / Reset, every setting, and firmware update. The same page is also a timer
-on its own, with no board connected.
+on its own, with no board connected. The board carries its own copy of that page (plain http), and the **installed app**
+from GitHub Pages can control the board too, through a secure WebSocket (see "The page on a phone").
 
 ## Build in the cloud (no local install)
 
@@ -56,7 +57,7 @@ through one GPIO anode pin under about 20 mA (or switch the anode with a transis
 | File                  | What it is                                                                                  |
 |-----------------------|---------------------------------------------------------------------------------------------|
 | `beacon-timer.ino`    | Soft AP + DNS captive portal, web server, home Wi-Fi, ArduinoOTA, HTTP update, LED PWM, settings in flash |
-| `tlshttps.cpp/.h`     | https://beacon-timer.local: own certificate authority, TLS server on 443 (direct answers, relay for the rest) |
+| `tlshttps.cpp/.h`     | `wss://<board>/ws`: own certificate authority, TLS server on 443 that carries the API for the installed app |
 | `engine.h`            | The timing engine: session plan (sets x repeats), accelerating pulse, transition, set colors, timer states |
 | `json.h`, `config.h`  | Small JSON reader and the settings parser (no external libraries)                            |
 | `ui/app.html`         | The web page (same file as the Claude artifact); `tools/embed_ui.py` turns it into `webui.h` |
@@ -78,7 +79,27 @@ to flash two seconds after the last change.
 | `POST /api/wake`          | Leave modem sleep (home Wi-Fi only)                                     |
 | `POST /api/power`         | `tx` = 0 full, 1 reduced (default), 2 low radio power, applied at once; `clear` resets the brown-out count. Returns the `/api/net` JSON |
 | `POST /api/sleep`         | Modem sleep now, if no session is running or paused                     |
-| `POST /update`            | Multipart firmware upload (field `firmware`), reboots when done         |
+| `POST /update`            | Multipart firmware upload (field `firmware`), reboots when done (plain http only, not over the socket) |
+| `GET /`, `GET /app`       | The page (gzipped). `/` is also what the captive portal opens. `/app` is the same page under a name that works on any network |
+
+### Secure WebSocket (for the installed app)
+
+`wss://beacon-timer.local/ws` (home Wi-Fi) or `wss://192.168.4.1/ws` (the board's own Wi-Fi). Port 443 serves only this
+(and a one-line note at `/`). Each text message is one API call, answered on the same socket:
+
+```
+browser -> board   <id> <GET|POST> /api/...[ f]\n<body>      id = digits; " f" marks a form-encoded body, otherwise it is plain text
+board -> browser   <id> <status>\n<body>                      status and body exactly as the http route returns them
+```
+
+Only `/api/` paths pass (no firmware upload). `/api/state` and `/api/wake` are answered on the socket itself; every other
+call is repeated to the handler on port 80, so there is one set of routes. A message can be up to 40 kB (the saved-timer
+list is the largest). A page from a site other than `https://combsbw.github.io` is refused (the `originOk` list in
+`tlshttps.cpp`). Up to 3 sockets are open at once (each TLS connection costs about 40 kB of RAM); a phone that vanished
+without closing is replaced by the next one that connects.
+
+The server certificate names both `beacon-timer.local` and `192.168.4.1`, is signed by the board's own authority (kept in
+flash, 20 years) and is renewed with every firmware build; the authority stays, so the phone's trust does not need repeating.
 
 ## Session layout
 
@@ -91,21 +112,21 @@ whole session is 15 s + 4 x 5 x (30 + 2 + 15) s - 15 s = 15:40.
 
 The timer in the page runs on the phone either way. The board is the LEDs, and the shared copy of settings and saved timers.
 
-- **One icon that also runs the board.** Put the board on home Wi-Fi (below), then in Safari open `http://beacon-timer.local`. Settings > Device > **One icon** downloads the certificate. Install that profile, then turn it on under Settings > General > About > Certificate Trust Settings. Open `https://beacon-timer.local`, tap Share > Add to Home Screen, and open the new icon once while the board is on. After that the icon opens with the board off or asleep, and connects when the board is on the same Wi-Fi. Delete any older Beacon icons.
-- **Offline iPhone icon with no board.** The site in `docs/` is the timer alone. With the repository public, set GitHub Pages to deploy from the `main` branch, folder `/docs`. The address is `https://combsbw.github.io/beacon-timer/`. That icon never connects to the board. To publish a new timer page, run `make pages`, push, make the repository public long enough to open the icon once, then it can be private again.
-- **Soft AP.** Join **Beacon-timer** and open `http://192.168.4.1`. That page can edit the board, and it only loads while the phone is on that network. Rebuild `icons.h` with `make icons.h` after changing the PNGs.
+- **Installed app (GitHub Pages).** The site in `docs/` is the whole timer. With the repository public, set GitHub Pages to deploy from `main`, folder `/docs` (`https://combsbw.github.io/beacon-timer/`); open it in Safari, Share > Add to Home Screen. It works on its own, with no board. For the board: Settings > Device > **Connect to the timer**, choose **Home Wi-Fi** (`beacon-timer.local`) or **Timer's own Wi-Fi** (`192.168.4.1`) and tap **Connect**. The app only goes looking for the board after it has connected once, and **Disconnect** stops that. To publish a new version, run `make pages`, push, make the repository public long enough to open the icon once, then it can be private again.
+- **One-time certificate.** An https page may only open a `wss` socket, so the phone has to trust the board's certificate once. Join the board's Wi-Fi (or put it on home Wi-Fi), open the board's own page in Safari (`http://192.168.4.1/app`, or **Timer's own page** in the app), and under Settings > Device > **Secure link for the app** tap Install certificate. Install the profile, then turn it on under Settings > General > About > Certificate Trust Settings. The first connect makes the phone ask to find devices on the local network (iOS), or to access devices on the network (Chrome): allow it. The board's own Wi-Fi has no internet, so the app opens from its saved copy there.
+- **The board's own page.** Join **Beacon-timer** and open `http://192.168.4.1` (the captive portal does it), or on home Wi-Fi `http://beacon-timer.local/app`. It carries the same controls, plus the firmware upload (a `.bin` only goes over plain http). It has no icon, manifest or offline copy: the installable app is the Pages one.
 
 ## Home Wi-Fi, sleep, and the access point
 
-Settings > Device > **Network**. The Wi-Fi name and password are the ones under **Online update** (2.4 GHz only). Turn on **Home Wi-Fi** and tap **Reboot** twice. The board joins that network, serves this same page at `http://beacon-timer.local` and, after the certificate above is trusted, at `https://beacon-timer.local`. The address is shown in Device.
+Settings > Device > **Network**. The Wi-Fi name and password are the ones under **Online update** (2.4 GHz only). Turn on **Home Wi-Fi** and tap **Reboot** twice. The board joins that network, serves this same page at `http://beacon-timer.local/app` and the installed app connects to `wss://beacon-timer.local/ws`. The address is shown in Device.
 
 On that network the board stays fully awake while a session is running or paused. Five minutes after the session stops, or when **Sleep** is tapped, the LEDs go off and the Wi-Fi radio goes into light modem sleep: it wakes for every router beacon that announces broadcast traffic, so the name `beacon-timer.local` still resolves and the board still answers. **Wake** (or **Asleep** in the header, or starting a session) brings the LEDs back. The phone has to be on that same network.
 
 ### Finding the board
 
-A page served by the board (its names or a private address) looks for the board until it finds it: every few seconds, and at once when the page comes back to the front or the phone's network returns. The header shows **Connect** while it has not found it and **Reconnect** if the board stopped answering; tapping either (or the **Connect** button in Settings > Device > Network) sends a wake and a status request right away. Each lookup is started again after 0.7 s (2.4 s over https) if the first try has not answered, so one lost packet no longer costs seconds. A page from anywhere else (GitHub Pages, the Claude artifact) never searches and shows **Standalone**.
+A page served by the board (its names or a private address) looks for the board until it finds it: every few seconds, and at once when the page comes back to the front or the phone's network returns. The header shows **Connect** while it has not found it and **Reconnect** if the board stopped answering; tapping either (or the **Connect** button in Settings > Device) sends a wake and a status request right away. Each lookup is started again after 0.7 s if the first try has not answered, so one lost packet no longer costs seconds. The installed app does the same over its socket once it has connected once: a failed call opens a fresh socket and asks again. A page from anywhere else (the Claude artifact) shows **Connect** and fails quietly.
 
-On the board: the join picks the strongest access point with the saved name, retries once, and is watched afterwards (the board asks to reconnect if the link stays down). Every 90 s, and after each reconnect, it announces `beacon-timer.local` again. A connection that has sent nothing is dropped after 0.4 s when another is waiting; Safari opens spare ones, and each used to stall the page for 5 s. Over https the page, icons, manifest, service worker and status poll are answered directly by the TLS server; only other calls are relayed to port 80.
+On the board: the join picks the strongest access point with the saved name, retries once, and is watched afterwards (the board asks to reconnect if the link stays down). Every 90 s, and after each reconnect, it announces `beacon-timer.local` again. A connection that has sent nothing is dropped after 0.4 s when another is waiting; Safari opens spare ones, and each used to stall the page for 5 s. Over the socket the status poll and wake are answered directly by the TLS server; other calls are repeated to port 80.
 
 ### Power and battery
 

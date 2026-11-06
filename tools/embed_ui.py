@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Turn ui/app.html into webui.h (a gzipped byte array the sketch serves at /).
+"""Turn ui/app.html into webui.h (a gzipped byte array the sketch serves at / and /app).
 
 ui/app.html is the same page that is published as the Claude artifact: it starts with <title>, a <meta> and a Google
 Fonts <link>, then one <style>, the markup and one <script>, with no <html>/<head>/<body>. The soft AP has no internet,
 so the fonts link is dropped (the CSS already falls back to system fonts) and the page is wrapped in a normal document.
+The board carries no icons, manifest or service worker: the installable app is the GitHub Pages copy (tools/build_pages.py).
 """
 import gzip
 import hashlib
@@ -29,15 +30,7 @@ page = (
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
     "<meta name=\"theme-color\" content=\"#0b0e10\"><title>Beacon Timer</title>"
-    "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\"><link rel=\"icon\" type=\"image/png\" href=\"/icon-192.png\">"
-    "<link rel=\"manifest\" href=\"/manifest.webmanifest\">"
-    "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"mobile-web-app-capable\" content=\"yes\">"
-    "<meta name=\"apple-mobile-web-app-title\" content=\"Beacon\">"
-    "<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black\">"
-    + style + "</head><body>" + body
-    + "<script>if('serviceWorker' in navigator){"
-    "navigator.serviceWorker.register('/sw.js').catch(function(){});}"
-    "</script></body></html>"
+    + style + "</head><body>" + body + "</body></html>"
 )
 
 raw = page.encode("utf-8")

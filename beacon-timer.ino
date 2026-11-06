@@ -4,7 +4,9 @@
  *   Board   : esp32:esp32:esp32s3  (arduino-esp32 core 2.0.17), USB CDC On Boot = enabled
  *   Wi-Fi   : open soft AP "Beacon-timer"  ->  http://192.168.4.1  (captive portal opens the page by itself)
  *             or, after Device > Network, the home network saved for online update -> http://beacon-timer.local
- *             and https://beacon-timer.local once the phone trusts the board's certificate (tlshttps.cpp)
+ *   Secure socket: wss://beacon-timer.local/ws (home Wi-Fi) or wss://192.168.4.1/ws (its own Wi-Fi) for the installed web app
+ *             on GitHub Pages, once the phone trusts the board's certificate (tlshttps.cpp). The board's own copy of the page
+ *             is plain http: / on its own Wi-Fi, /app on any network.
  *   Sleep   : home-network mode only. LEDs off and light Wi-Fi modem sleep (wakes for every DTIM beacon, so the name
  *             beacon-timer.local still resolves) after 5 min idle, or when the page asks. A wake request (or starting
  *             a session) brings the LEDs back. The AP never sleeps.
@@ -42,7 +44,6 @@
 #include "json.h"
 #include "config.h"
 #include "webui.h"
-#include "icons.h"
 #include "ghupdate.h"
 #include "tlshttps.h"
 
@@ -388,49 +389,6 @@ static void handleRoot() {
   server.sendHeader("Content-Encoding", "gzip");
   server.sendHeader("Cache-Control", "no-cache");
   server.send_P(200, "text/html; charset=utf-8", (const char*)WEBUI_GZ, WEBUI_GZ_LEN);
-}
-
-// Home-screen icon (iOS "Add to Home Screen" reads apple-touch-icon) and the web app manifest.
-static void sendIcon(const uint8_t* data, size_t len) {
-  server.sendHeader("Cache-Control", "public, max-age=86400");
-  server.send_P(200, "image/png", (const char*)data, len);
-}
-static void handleIcon180() { sendIcon(ICON_180, ICON_180_LEN); }
-static void handleIcon192() { sendIcon(ICON_192, ICON_192_LEN); }
-static const char MANIFEST_JSON[] =
-  "{\"name\":\"Beacon Timer\",\"short_name\":\"Beacon\",\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\","
-  "\"orientation\":\"any\",\"background_color\":\"#0b0e10\",\"theme_color\":\"#0b0e10\","
-  "\"icons\":[{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\",\"purpose\":\"any\"},"
-  "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"}]}";
-static void handleManifest() {
-  server.sendHeader("Cache-Control", "public, max-age=86400");
-  server.send(200, "application/manifest+json", MANIFEST_JSON);
-}
-
-// The home-screen icon loads this when the board is off. API calls stay on the network. Built once at boot; port 80 and
-// port 443 both serve this same text.
-static char swBody[2200];
-static void buildSw() {
-  snprintf(swBody, sizeof swBody,
-    "var CACHE='%s';\n"
-    "var SHELL=['/','/manifest.webmanifest','/apple-touch-icon.png','/icon-192.png'];\n"
-    "self.addEventListener('install',function(e){e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));});\n"
-    "self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(keys){return Promise.all(keys.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});\n"
-    "self.addEventListener('fetch',function(e){\n"
-    "if(e.request.method!=='GET')return;\n"
-    "var u=new URL(e.request.url);\n"
-    "if(u.origin!==self.location.origin)return;\n"
-    "if(u.pathname.indexOf('/api/')===0||u.pathname==='/update'||u.pathname==='/sw.js'||u.pathname.indexOf('/beacon')===0)return;\n"
-    "var shell=SHELL.indexOf(u.pathname)>=0;\n"
-    "if(!shell&&e.request.mode!=='navigate')return;\n"
-    "e.respondWith(caches.match(shell?e.request:'/').then(function(hit){\n"
-    "var net=fetch(e.request).then(function(res){if(res&&res.ok&&(shell||e.request.mode==='navigate')){var copy=res.clone();caches.open(CACHE).then(function(c){c.put(e.request.mode==='navigate'?'/':e.request,copy);});}return res;}).catch(function(){return hit||caches.match('/');});\n"
-    "return hit||net;}));});\n",
-    WEBUI_CACHE_ID);
-}
-static void handleSw() {
-  server.sendHeader("Cache-Control", "no-cache");
-  server.send(200, "application/javascript", swBody);
 }
 
 // iPhone installs this from http:// first. Trust is a separate switch the page explains.
@@ -884,26 +842,11 @@ static const char* resetName(esp_reset_reason_t r) {
 
 static void onGotIp(arduino_event_id_t) { gotIpFlag = true; }
 
-// Everything on port 443 that does not need the page on port 80: the page, icons, manifest, service worker, and the status poll.
-// Answering these directly (no relay, no copy in RAM) keeps each TLS connection short and its memory small.
+// Port 443 is only the secure WebSocket (tlshttps.cpp). The status poll and wake are answered there directly;
+// everything else the page asks for is repeated to the handlers on port 80.
 static int jsonState(char* buf, size_t cap) { return stateJson(buf, cap); }
 static int jsonWake(char* buf, size_t cap) { noteActivity(); return stateJson(buf, cap); }
 static const TlsJson TLS_JSON[] = {{"/api/state", 0, jsonState}, {"/api/wake", 1, jsonWake}};
-static TlsAsset tlsAssets[12];
-
-static void registerTlsRoutes() {
-  size_t n = 0;
-  const char* pngCache = "public, max-age=86400";
-  tlsAssets[n++] = TlsAsset{"/", "text/html; charset=utf-8", (const uint8_t*)WEBUI_GZ, WEBUI_GZ_LEN, 1, "no-cache"};
-  static const char* const ICON180[] = {"/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/apple-touch-icon-180x180.png",
-                                         "/apple-touch-icon-180x180-precomposed.png", "/apple-touch-icon-152x152.png"};
-  for (const char* u : ICON180) tlsAssets[n++] = TlsAsset{u, "image/png", ICON_180, ICON_180_LEN, 0, pngCache};
-  tlsAssets[n++] = TlsAsset{"/icon-192.png", "image/png", ICON_192, ICON_192_LEN, 0, pngCache};
-  tlsAssets[n++] = TlsAsset{"/favicon.ico", "image/png", ICON_192, ICON_192_LEN, 0, pngCache};
-  tlsAssets[n++] = TlsAsset{"/manifest.webmanifest", "application/manifest+json", (const uint8_t*)MANIFEST_JSON, sizeof MANIFEST_JSON - 1, 0, pngCache};
-  tlsAssets[n++] = TlsAsset{"/sw.js", "application/javascript", (const uint8_t*)swBody, strlen(swBody), 0, "no-cache"};
-  tlsRoutes(tlsAssets, n, TLS_JSON, sizeof TLS_JSON / sizeof TLS_JSON[0]);
-}
 
 void setup() {
   setCpuFrequencyMhz(160);              // Wi-Fi and the LEDs do not need 240 MHz; this trims the supply current
@@ -935,18 +878,9 @@ void setup() {
   if (fsOk) tlsPrepare();
   idleSinceMs = millis();
   mdnsPokeAt = millis() + MDNS_POKE_MS;
-  buildSw();
 
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/apple-touch-icon.png", HTTP_GET, handleIcon180);
-  server.on("/apple-touch-icon-precomposed.png", HTTP_GET, handleIcon180);
-  server.on("/apple-touch-icon-180x180.png", HTTP_GET, handleIcon180);
-  server.on("/apple-touch-icon-180x180-precomposed.png", HTTP_GET, handleIcon180);
-  server.on("/apple-touch-icon-152x152.png", HTTP_GET, handleIcon180);
-  server.on("/icon-192.png", HTTP_GET, handleIcon192);
-  server.on("/favicon.ico", HTTP_GET, handleIcon192);
-  server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
-  server.on("/sw.js", HTTP_GET, handleSw);
+  server.on("/app", HTTP_GET, handleRoot);        // the same page under a name that works on any network
   server.on("/beacon.mobileconfig", HTTP_GET, handleCertProfile);
   server.on("/api/state", HTTP_GET, sendState);
   server.on("/api/net", HTTP_GET, handleNetInfo);
@@ -966,8 +900,8 @@ void setup() {
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateData);
   server.onNotFound(handleNotFound);
   server.begin();
-  registerTlsRoutes();
-  if (radioSta && tlsStart()) MDNS.addService("https", "tcp", 443);
+  tlsRoutes(TLS_JSON, sizeof TLS_JSON / sizeof TLS_JSON[0]);
+  if (tlsStart() && radioSta) MDNS.addService("wss", "tcp", 443);   // wss://beacon-timer.local/ws on home Wi-Fi, wss://192.168.4.1/ws on the board's own
 
   ArduinoOTA.setHostname(HOST_NAME);
   ArduinoOTA.setPort(OTA_PORT);
@@ -977,7 +911,7 @@ void setup() {
   ArduinoOTA.begin();
 
   Serial.printf("Beacon Timer %s  reset: %s  brown-outs: %lu  free heap %lu\n", FW_VERSION, rstName, (unsigned long)boCount, (unsigned long)ESP.getFreeHeap());
-  if (radioSta) Serial.printf("STA http://%s  http://%s.local  https://%s.local  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, HOST_NAME, OTA_PORT);
+  if (radioSta) Serial.printf("STA http://%s/app  http://%s.local/app  wss://%s.local/ws  OTA port %d\n", WiFi.localIP().toString().c_str(), HOST_NAME, HOST_NAME, OTA_PORT);
   else Serial.printf("AP \"%s\" (open)  http://%s  OTA port %d%s\n", AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_PORT, staFailed ? "  (home Wi-Fi join failed)" : "");
 }
 
