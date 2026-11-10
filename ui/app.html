@@ -410,15 +410,28 @@ a.fbtn{text-decoration:none;width:fit-content}
           <div class="warnline" id="pinWarn" hidden><svg class="ic"><use href="#i-warn"/></svg><span>Pin used twice</span></div>
           <div class="pcard" id="fwCard">
             <div class="ph"><svg class="ic"><use href="#i-upload"/></svg><span>Sketch</span><span class="mono" id="fwVer" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)">demo</span></div>
-            <div class="fwrow">
+            <div class="fwrow" id="fwPickRow">
               <input type="file" id="fwFile" accept=".bin,application/octet-stream" hidden>
               <button class="fbtn" id="fwPick" type="button"><svg class="ic"><use href="#i-file"/></svg>Choose .bin</button>
               <span class="fname" id="fwName">No file</span>
             </div>
+            <p class="note" id="fwWsNote" hidden>Firmware files are uploaded from the timer’s own page (Connect to the timer, then “Timer’s own page”). Online update below works from here.</p>
             <div class="fbar" id="fwBar" hidden><i id="fwFill"></i></div>
             <div class="fwrow">
               <button class="fbtn primary" id="fwGo" type="button" disabled><svg class="ic"><use href="#i-upload"/></svg><span id="fwGoTxt">Upload</span></button>
               <button class="fbtn badge" id="rebootBtn" type="button"><svg class="ic"><use href="#i-power"/></svg>Reboot</button>
+            </div>
+          </div>
+          <div class="pcard" id="linkCard" hidden>
+            <div class="ph"><svg class="ic"><use href="#i-link"/></svg><span>Connect to the timer</span><span class="mono" id="lkStat" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
+            <div class="seg" id="tgSeg" role="group" aria-label="Which Wi-Fi the timer is on">
+              <button type="button" data-t="home" aria-pressed="true">Home Wi-Fi</button><button type="button" data-t="ap" aria-pressed="false">Timer’s own Wi-Fi</button>
+            </div>
+            <p class="note" id="lkNote" aria-live="polite"></p>
+            <div class="fwrow">
+              <button class="fbtn primary" id="lkGo" type="button"><svg class="ic"><use href="#i-wifi"/></svg><span id="lkGoTxt">Connect</span></button>
+              <button class="fbtn" id="lkOff" type="button" hidden><svg class="ic"><use href="#i-x"/></svg><span>Disconnect</span></button>
+              <a class="fbtn" id="lkPage" href="http://beacon-timer.local/app" target="_blank" rel="noopener"><svg class="ic"><use href="#i-link"/></svg>Timer’s own page</a>
             </div>
           </div>
           <div class="pcard" id="netCard">
@@ -444,7 +457,7 @@ a.fbtn{text-decoration:none;width:fit-content}
             </div>
           </div>
           <div class="pcard" id="certCard" hidden>
-            <div class="ph"><svg class="ic"><use href="#i-link"/></svg><span>One icon</span></div>
+            <div class="ph"><svg class="ic"><use href="#i-link"/></svg><span>Secure link for the app</span></div>
             <p class="note" id="certNote"></p>
             <a class="fbtn primary" id="certBtn" href="/beacon.mobileconfig" hidden>Install certificate</a>
           </div>
@@ -1295,10 +1308,77 @@ const DEV={on:false,rev:-1,seq:0,gen:0,fails:0,rebooting:false,pending:false,inf
 /* Pages the board can serve: its names and any private address. Anywhere else (GitHub Pages, the artifact) the timer stands alone and never searches for a board. */
 const HOSTN=location.hostname;
 const DEV_LIKE=/^https?:$/.test(location.protocol)&&(HOSTN==='beacon-timer.local'||HOSTN==='localhost'||HOSTN==='127.0.0.1'||/\.local$/.test(HOSTN)||/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(HOSTN));
-const CONN={busy:false,n:0,t:0};
+const CONN={busy:false,n:0,t:0,fail:false};
 const RECON='Reconnect';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+/* How requests reach the timer.
+   On a page the board serves (plain http) they are ordinary fetch calls to the same address.
+   On any other page (the installed GitHub Pages app) they travel over one secure WebSocket, wss://<timer>/ws, because an https page may not
+   use plain http. Each call is a text message "<id> <METHOD> <path>[ f]\n<body>" ("f" = form-encoded body) and the answer is "<id> <status>\n<body>". */
+const WS_OK=!DEV_LIKE&&/^https?:$/.test(location.protocol)&&typeof WebSocket==='function';
+const TARGETS={home:{host:'beacon-timer.local'},ap:{host:'192.168.4.1'}};
+function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+const WS={sock:null,opening:null,abort:null,id:0,wait:new Map(),target:lsGet('beacon.target')==='ap'?'ap':'home',auto:lsGet('beacon.auto')==='1'};
+const devHost=()=>WS_OK?TARGETS[WS.target].host:location.host;
+function wsDrop(why){
+  const s=WS.sock, ab=WS.abort; WS.sock=null; WS.opening=null; WS.abort=null;
+  if(ab) ab(new Error(why||'closed'));
+  if(s){ s.onopen=s.onmessage=s.onclose=s.onerror=null; try{ s.close(); }catch(e){} }
+  const err=new Error(why||'closed');
+  WS.wait.forEach(w=>{ clearTimeout(w.t); w.rej(err); }); WS.wait.clear();
+}
+function wsOpen(){
+  if(WS.sock&&WS.sock.readyState===1) return Promise.resolve(WS.sock);
+  if(WS.opening) return WS.opening;
+  const url='wss://'+TARGETS[WS.target].host+'/ws';
+  const pr=new Promise((res,rej)=>{
+    let s=null, done=false;
+    const fail=e=>{ if(done) return; done=true; clearTimeout(to); if(WS.opening===pr) WS.opening=null; if(WS.sock===s) WS.sock=null; WS.abort=null;
+      if(s){ s.onopen=s.onmessage=s.onclose=s.onerror=null; try{ s.close(); }catch(x){} } rej(e); };
+    const to=setTimeout(()=>fail(new Error('connect timeout')),6000);
+    WS.abort=fail;
+    try{ s=new WebSocket(url); }catch(e){ fail(e); return; }
+    WS.sock=s;
+    s.onopen=()=>{ if(done) return; done=true; clearTimeout(to); WS.opening=null; WS.abort=null; res(s); };
+    s.onerror=()=>fail(new Error('socket'));
+    s.onclose=()=>{ if(!done) fail(new Error('closed')); else if(WS.sock===s) wsDrop('closed'); };
+    s.onmessage=ev=>wsMsg(ev.data);
+  });
+  WS.opening=pr;
+  return pr;
+}
+function wsMsg(data){
+  if(typeof data!=='string') return;
+  const nl=data.indexOf('\n'), head=nl<0?data:data.slice(0,nl), body=nl<0?'':data.slice(nl+1);
+  const sp=head.indexOf(' '); if(sp<0) return;
+  const id=head.slice(0,sp), st=Number(head.slice(sp+1)), w=WS.wait.get(id);
+  if(!w) return;                                                   /* a late answer to a call that already timed out */
+  WS.wait.delete(id); clearTimeout(w.t);
+  if(st>=200&&st<300){ try{ w.res(body?JSON.parse(body):null); }catch(e){ w.rej(new Error('bad json')); } }
+  else w.rej(new Error(String(st)));
+}
+async function wsCall(path,opt){
+  opt=opt||{};
+  const ms=opt.timeout||(DEV.asleep?8000:3000);
+  const s=await wsOpen();
+  return new Promise((res,rej)=>{
+    const id=String(++WS.id), form=typeof URLSearchParams!=='undefined'&&opt.body instanceof URLSearchParams;
+    const t=setTimeout(()=>{ WS.wait.delete(id); rej(new Error('timeout')); },ms);
+    WS.wait.set(id,{res,rej,t});
+    try{ s.send(id+' '+(opt.method||'GET')+' '+path+(form?' f':'')+'\n'+(opt.body==null?'':String(opt.body))); }
+    catch(e){ clearTimeout(t); WS.wait.delete(id); rej(e); }
+  });
+}
+/* a socket is reliable, so a failed call means the socket is suspect: open a fresh one and ask once more */
+async function wsHedged(path,opt){
+  opt=Object.assign({},opt||{});
+  const each=opt.timeout||5000; delete opt.timeout; delete opt.gap; delete opt.max;
+  try{ return await wsCall(path,Object.assign({timeout:each},opt)); }
+  catch(e){ wsDrop('retry'); return await wsCall(path,Object.assign({timeout:each},opt)); }
+}
 function api(path,opt){
+  if(WS_OK) return wsCall(path,opt);
   opt=Object.assign({},opt||{});
   const ms=opt.timeout||(DEV.asleep?8000:3000); delete opt.timeout;
   const c=new AbortController(), t=setTimeout(()=>c.abort(),ms);
@@ -1308,6 +1388,7 @@ function api(path,opt){
 /* One request that does not wait out a slow or lost first attempt. If the first try has not answered after `gap` ms, or it fails, another is
    started (up to `max`), and the first good answer wins. Only for requests that are safe to repeat: the state poll and wake. */
 function hedged(path,opt){
+  if(WS_OK) return wsHedged(path,opt);
   opt=Object.assign({},opt||{});
   const tls=location.protocol==='https:';
   const gap=opt.gap||(tls?2400:700), max=opt.max||(tls?2:3), each=opt.timeout||(tls?8000:3500);
@@ -1329,9 +1410,9 @@ function hedged(path,opt){
   });
 }
 function linkLabel(){
-  if(!DEV.on) return DEV_LIKE?(CONN.busy?'Connecting…':'Connect'):'Standalone';
+  if(!DEV.on) return (DEV_LIKE||WS_OK)?(CONN.busy?'Connecting…':'Connect'):'Standalone';
   if(DEV.asleep) return 'Asleep';
-  if(DEV.net==='sta') return location.host;
+  if(DEV.net==='sta') return devHost();
   return DEV.fail?'AP fallback':'192.168.4.1';
 }
 function setLink(ok,text){
@@ -1339,7 +1420,7 @@ function setLink(ok,text){
   const label=text||linkLabel();
   $('#linkTxt').textContent=label;
   const wake=!!(DEV.on&&DEV.asleep&&label==='Asleep');
-  const act=!wake&&((!DEV.on&&DEV_LIKE&&!CONN.busy)||(DEV.on&&!DEV.rebooting&&label===RECON));
+  const act=!wake&&((!DEV.on&&(DEV_LIKE||WS_OK)&&!CONN.busy)||(DEV.on&&!DEV.rebooting&&label===RECON));
   const chip=$('#linkChip');
   chip.classList.toggle('wake',wake); chip.classList.toggle('act',act);
   if(wake||act){ chip.setAttribute('role','button'); chip.tabIndex=0; chip.setAttribute('aria-label',wake?'Wake the timer':'Connect to the timer'); }
@@ -1382,7 +1463,7 @@ function devPush(){
   },350);
 }
 async function devPoll(){
-  if(!DEV.on) return;
+  if(!DEV.on){ DEV.polling=false; return; }
   if(!DEV.rebooting){
     const gen=DEV.gen, seq=DEV.seq, t0=performance.now();
     try{
@@ -1431,6 +1512,7 @@ async function devAttach(j){
 }
 async function devConnect(manual){
   if(CONN.busy) return false;
+  if(WS_OK&&!manual&&!WS.auto) return false;                           /* the app only goes looking after it has been connected once */
   if(DEV.on&&!manual) return true;
   CONN.busy=true; CONN.n++;
   clearTimeout(CONN.t);
@@ -1439,14 +1521,15 @@ async function devConnect(manual){
   let ok=false;
   try{
     let j=null;
+    if(WS_OK&&manual) wsDrop('retry');                                 /* a fresh socket, not one that may be dead */
     if(manual){ try{ j=await hedged('/api/wake',{method:'POST'}); }catch(e){ j=null; } }
-    if(!j) j=await hedged('/api/state',DEV_LIKE?{}:{max:1});
-    if(j&&j.app==='beacon'){ await devAttach(j); ok=true; }
+    if(!j) j=await hedged('/api/state',(DEV_LIKE||WS_OK)?{}:{max:1});
+    if(j&&j.app==='beacon'){ await devAttach(j); ok=true; if(WS_OK){ WS.auto=true; lsSet('beacon.auto','1'); } }
   }catch(e){}
-  CONN.busy=false;
+  CONN.busy=false; CONN.fail=WS_OK&&manual&&!ok;
   if(!ok){
     setLink(false,DEV.on?RECON:undefined);
-    if(!DEV.on&&DEV_LIKE) CONN.t=setTimeout(()=>devConnect(false),Math.min(1500+CONN.n*700,6000));
+    if(!DEV.on&&(DEV_LIKE||(WS_OK&&WS.auto))) CONN.t=setTimeout(()=>devConnect(false),Math.min(1500+CONN.n*700,6000));
   }
   renderNet();
   return ok;
@@ -1482,14 +1565,15 @@ function pwrText(){
   return p.join(' · ');
 }
 function renderNet(){
+  renderLink();
   const i=NET.info, on=DEV.on&&!!i;
   const sta=on&&i.radio==='sta';
   sleepBtn.hidden=!sta||DEV.asleep;
   wakeBtn.hidden=!sta||!DEV.asleep;
   netGo.hidden=!NET.hold;
   netSta.disabled=!on;
-  const lost=DEV.on&&DEV.fails>=3, find=DEV_LIKE&&(!DEV.on||lost);
-  connBtn.hidden=!find; connBtn.disabled=CONN.busy; connTxt.textContent=CONN.busy?'Connecting…':(DEV.on?'Reconnect':'Connect');
+  const lost=DEV.on&&DEV.fails>=3, find=(DEV_LIKE||WS_OK)&&(!DEV.on||lost);
+  connBtn.hidden=!find||WS_OK; connBtn.disabled=CONN.busy; connTxt.textContent=CONN.busy?'Connecting…':(DEV.on?'Reconnect':'Connect');
   netStat.textContent=on?(sta?(DEV.asleep?'asleep':i.ip):(i.fail?'fallback':i.ip)):'';
   if(!NET.hold) netSta.checked=on&&i.wanted==='sta';
   txRow.hidden=!on;
@@ -1501,7 +1585,7 @@ function renderNet(){
   const key=!on?'off'+(find?'f':'')+(lost?'l':''):[i.radio,i.wanted,i.fail?1:0,DEV.asleep?1:0,i.ip,NET.hold?1:0,lost?1:0].join('|');
   if(key===NET.key) { $('#sum-dev').textContent=devSummary(); renderCert(); return; }
   NET.key=key;
-  if(!on) netMsg(DEV_LIKE?'Not connected to the timer. Tap Connect. This phone has to be on the same Wi-Fi as the timer: its home Wi-Fi, or Beacon-timer. Then it finds the timer again on its own every few seconds.':'Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
+  if(!on) netMsg(WS_OK?'Not connected to the timer. Use Connect to the timer above.':DEV_LIKE?'Not connected to the timer. Tap Connect. This phone has to be on the same Wi-Fi as the timer: its home Wi-Fi, or Beacon-timer. Then it finds the timer again on its own every few seconds.':'Available when this page is connected to the timer. Home Wi-Fi uses the name and password under Online update.');
   else if(lost) netMsg('The timer stopped answering. Tap Reconnect. If it keeps failing, check that the timer has power and that this phone is on its Wi-Fi.',true);
   else if(NET.hold){ /* the switch handler wrote the reboot instructions */ }
   else if(i.fail) netMsg('Could not join “'+(i.ssid||'the saved network')+'”. This boot is the Beacon-timer access point. Check the name and password below. The next boot tries again unless Home Wi-Fi is turned off.');
@@ -1513,15 +1597,10 @@ function renderNet(){
 }
 function renderCert(){
   const card=$('#certCard'), btn=$('#certBtn'), note=$('#certNote');
-  if(location.hostname!=='beacon-timer.local'){ card.hidden=true; return; }
+  if(!DEV_LIKE||location.protocol!=='http:'){ card.hidden=true; return; }
   card.hidden=false;
-  if(location.protocol==='https:'){
-    btn.hidden=true;
-    note.textContent='This icon opens from the phone when the timer is off. It connects when the timer is on this Wi-Fi.';
-    return;
-  }
   btn.hidden=false;
-  note.textContent='Do this once in Safari, while the timer is on this Wi-Fi. Tap Install certificate and allow the profile. Open Settings, tap Profile Downloaded at the top, then Install. Then go to Settings, General, About, Certificate Trust Settings, and turn Beacon Timer on. Back in Safari, open https://beacon-timer.local. If the phone asks to find devices on the local network, allow it. Tap Share, Add to Home Screen, and open that icon once while the timer is still on. The other Beacon icons can be deleted. If Profile Downloaded is missing, tap Install certificate again. It only stays available for a few minutes.';
+  note.textContent='The installed app (GitHub Pages) talks to the timer over a secure link, so the phone has to trust the timer’s certificate once. In Safari, while the timer is on this Wi-Fi, tap Install certificate and allow the profile. Open Settings, tap Profile Downloaded at the top, then Install. Then go to Settings, General, About, Certificate Trust Settings, and turn Beacon Timer on. When the app first connects the phone may ask to find devices on the local network: allow it. If Profile Downloaded is missing, tap Install certificate again. It only stays available for a few minutes. The trust stays across firmware updates.';
 }
 async function netLoad(){
   if(!DEV.on){ NET.info=null; NET.key=''; renderNet(); return; }
@@ -1586,10 +1665,46 @@ $('#linkChip').addEventListener('click',linkGo);
 $('#linkChip').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); linkGo(); } });
 $('#connBtn').addEventListener('click',()=>devConnect(true));
 /* coming back to the page, or the phone's network coming back, is the moment to look again */
-const rejoin=()=>{ if(!DEV_LIKE||document.visibilityState==='hidden') return; if(!DEV.on) devConnect(false); else if(DEV.fails>=3) devConnect(true); };
+const rejoin=()=>{ if(!(DEV_LIKE||(WS_OK&&WS.auto))||document.visibilityState==='hidden') return; if(!DEV.on) devConnect(false); else if(DEV.fails>=3) devConnect(true); };
 document.addEventListener('visibilitychange',rejoin);
 window.addEventListener('online',rejoin);
 window.addEventListener('pageshow',rejoin);
+/* Connect-to-the-timer card (the installed app only): which Wi-Fi the timer is on, and Connect / Disconnect */
+const tgSeg=$('#tgSeg'), lkGo=$('#lkGo'), lkGoTxt=$('#lkGoTxt'), lkOff=$('#lkOff'), lkPage=$('#lkPage'), lkNote=$('#lkNote'), lkStat=$('#lkStat');
+function renderLink(){
+  const card=$('#linkCard'); card.hidden=!WS_OK; if(!WS_OK) return;
+  const T=TARGETS[WS.target], home=WS.target==='home';
+  tgSeg.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===WS.target));
+  lkStat.textContent=CONN.busy?'connecting…':DEV.on?(DEV.fails>=3?'not answering':'connected'):'';
+  lkGoTxt.textContent=CONN.busy?'Connecting…':(DEV.on?'Reconnect':'Connect'); lkGo.disabled=CONN.busy;
+  lkOff.hidden=!(DEV.on||WS.auto);
+  lkPage.href='http://'+T.host+'/app';
+  lkNote.textContent=CONN.fail
+    ? 'Could not reach '+T.host+'. Check that this phone is on '+(home?'the same Wi-Fi as the timer':'the Beacon-timer Wi-Fi')+', that the timer has power, and that its certificate is installed (open the timer’s own page, then “Secure link for the app”).'
+    : DEV.on
+      ? 'Connected to '+T.host+' over a secure link. It reconnects by itself when this app opens or the network comes back.'
+      : home
+        ? 'For a timer that has joined your home Wi-Fi. This phone must be on that Wi-Fi. The timer’s own page is where you join it to your Wi-Fi and install its certificate.'
+        : 'For the timer’s own Beacon-timer Wi-Fi (no internet there, so this app opens from its saved copy). Join Beacon-timer on this phone first.';
+}
+function devDisconnect(){
+  WS.auto=false; lsSet('beacon.auto','0');
+  clearTimeout(CONN.t); wsDrop('disconnect');
+  DEV.on=false; DEV.fails=0; DEV.asleep=false; DEV.rebooting=false; DEV.inflight=0; DEV.pending=false;
+  NET.info=null; NET.key=''; UP.info=null; CONN.fail=false;
+  setLink(false); renderNet(); upRender();
+}
+tgSeg.addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b||!WS_OK||b.dataset.t===WS.target) return;
+  const was=DEV.on||WS.auto;
+  WS.target=b.dataset.t; lsSet('beacon.target',WS.target);
+  clearTimeout(CONN.t); wsDrop('target');
+  if(DEV.on){ DEV.on=false; DEV.fails=0; DEV.asleep=false; NET.info=null; NET.key=''; UP.info=null; setLink(false); upRender(); }
+  CONN.fail=false; renderNet();
+  if(was) devConnect(true);
+});
+lkGo.addEventListener('click',()=>devConnect(true));
+lkOff.addEventListener('click',devDisconnect);
 renderNet();
 
 /* sketch upload and reboot: real on the device, simulated in this preview */
@@ -1608,6 +1723,7 @@ function xhrUpload(file,onProg){
 function fakeUpload(onProg){
   return new Promise(res=>{ const t0=performance.now(); (function tick(now){ const p=clamp((now-t0)/3200,0,1); onProg(p); if(p<1) requestAnimationFrame(tick); else res(); })(t0); });
 }
+if(WS_OK){ $('#fwPickRow').hidden=true; fwGo.hidden=true; $('#fwWsNote').hidden=false; }   /* a .bin is uploaded over plain http, from the timer's own page */
 $('#fwPick').addEventListener('click',()=>fwFile.click());
 fwFile.addEventListener('change',()=>{
   const f=fwFile.files&&fwFile.files[0]; FW.file=f||null;
@@ -1857,5 +1973,6 @@ rebuildAll();
 presetsLoad();
 requestAnimationFrame(frame);
 renderCert();
+if(WS_OK) setLink(false);                          /* the installed app starts as "Connect", not as the address in the markup */
 devConnect(false);
 </script>

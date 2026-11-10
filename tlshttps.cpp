@@ -1,10 +1,15 @@
 /*
- * HTTPS for https://beacon-timer.local.
+ * Secure WebSocket for the Beacon Timer page.
  *
  * The board generates its own certificate authority and a short-lived server certificate
  * the first time it boots, and keeps them in LittleFS so a firmware update does not
- * replace the authority the phone already trusts. Port 443 accepts the connection and
- * repeats the request to the existing page on port 80, so there is one set of routes.
+ * replace the authority the phone already trusts. The server certificate names both
+ * beacon-timer.local (home Wi-Fi) and 192.168.4.1 (the board's own Wi-Fi).
+ *
+ * Port 443 serves one thing: wss://<board>/ws. The installed web app (GitHub Pages, https) cannot
+ * use plain http or ws, so each request it sends over the socket is repeated to the existing
+ * handler on port 80 and the answer comes back on the same socket. The page itself is NOT
+ * served over https; the board's own copy is plain http (/ on its Wi-Fi, /app anywhere).
  */
 #include "tlshttps.h"
 #include "certwindow.h"
@@ -16,6 +21,7 @@
 #include <esp_https_server.h>
 #include <esp_system.h>
 #include <string.h>
+#include <strings.h>
 
 #include "mbedtls/ecp.h"
 #include "mbedtls/oid.h"
@@ -29,6 +35,11 @@ static const unsigned char EKU_SERVER[] = {
 };
 
 static httpd_handle_t https = nullptr;
+
+// The board's own Wi-Fi address (WiFi.softAP default). The server certificate lists it so wss://192.168.4.1/ws is trusted.
+static const unsigned char AP_IP4[4] = {192, 168, 4, 1};
+// Written next to the certificate; a different value (new dates, or a new layout of the certificate) makes the board sign a new one.
+#define CERT_LAYOUT "-ip"
 
 static int rng(void*, unsigned char* out, size_t len) {
   esp_fill_random(out, len);
@@ -69,21 +80,28 @@ static bool pairOk(const char* crtPath, const char* keyPath) {
   return ok;
 }
 
-static int sanBytes(unsigned char* out, size_t cap, const char* dns) {
+// SubjectAltName: the DNS name, and (when ip is not null) one IPv4 address given as four numbers.
+static int sanBytes(unsigned char* out, size_t cap, const char* dns, const unsigned char* ip) {
   size_t n = strlen(dns);
-  if (n < 1 || n > 100 || cap < n + 4) return -1;
+  size_t total = n + 2 + (ip ? 6 : 0);
+  if (n < 1 || n > 100 || cap < total + 2) return -1;
   out[0] = 0x30;
-  out[1] = (unsigned char)(n + 2);
+  out[1] = (unsigned char)total;
   out[2] = 0x82;
   out[3] = (unsigned char)n;
   memcpy(out + 4, dns, n);
-  return (int)(n + 4);
+  if (ip) {
+    out[4 + n] = 0x87;
+    out[5 + n] = 4;
+    memcpy(out + 6 + n, ip, 4);
+  }
+  return (int)(total + 2);
 }
 
 static bool makeCert(mbedtls_pk_context* subjectKey, mbedtls_pk_context* issuerKey,
                      const char* subject, const char* issuer, int isCa,
                      const char* notBefore, const char* notAfter,
-                     const char* dns, char* pemOut, size_t pemCap) {
+                     const char* dns, const unsigned char* ip, char* pemOut, size_t pemCap) {
   mbedtls_mpi serial;
   mbedtls_x509write_cert crt;
   mbedtls_mpi_init(&serial);
@@ -111,7 +129,7 @@ static bool makeCert(mbedtls_pk_context* subjectKey, mbedtls_pk_context* issuerK
   if (mbedtls_x509write_crt_set_subject_key_identifier(&crt) != 0) goto done;
   if (mbedtls_x509write_crt_set_authority_key_identifier(&crt) != 0) goto done;
   if (!isCa) {
-    sanLen = sanBytes(san, sizeof san, dns);
+    sanLen = sanBytes(san, sizeof san, dns, ip);
     if (sanLen < 0) goto done;
     if (mbedtls_x509write_crt_set_extension(&crt, MBEDTLS_OID_SUBJECT_ALT_NAME,
           MBEDTLS_OID_SIZE(MBEDTLS_OID_SUBJECT_ALT_NAME), 0, san, (size_t)sanLen) != 0) goto done;
@@ -150,11 +168,11 @@ static bool issueServer(mbedtls_pk_context* caKey) {
   if (!srvPem || !keyPem) goto done;
   keyed = true;
   if (!makeKey(&srv, keyPem, 2048)) { Serial.println("cert: server key failed"); goto done; }
-  if (!makeCert(&srv, caKey, SRV_SUBJ, CA_SUBJ, 0, CERT_NOT_BEFORE, CERT_NOT_AFTER, TLS_HOST, srvPem, 2048)) {
+  if (!makeCert(&srv, caKey, SRV_SUBJ, CA_SUBJ, 0, CERT_NOT_BEFORE, CERT_NOT_AFTER, TLS_HOST, AP_IP4, srvPem, 2048)) {
     Serial.println("cert: server certificate failed");
     goto done;
   }
-  if (!writeFile("/srv.key.tmp", keyPem) || !writeFile("/srv.crt.tmp", srvPem) || !writeFile("/srv.dates.tmp", CERT_NOT_AFTER)) goto done;
+  if (!writeFile("/srv.key.tmp", keyPem) || !writeFile("/srv.crt.tmp", srvPem) || !writeFile("/srv.dates.tmp", CERT_NOT_AFTER CERT_LAYOUT)) goto done;
   LittleFS.remove("/srv.key");
   LittleFS.remove("/srv.crt");
   LittleFS.remove("/srv.dates");
@@ -176,7 +194,7 @@ static bool issueCa() {
   if (!crtPem || !keyPem) goto done;
   keyed = true;
   if (!makeKey(&ca, keyPem, 2048)) { Serial.println("cert: authority key failed"); goto done; }
-  if (!makeCert(&ca, &ca, CA_SUBJ, CA_SUBJ, 1, "20200101000000", "20400101000000", nullptr, crtPem, 2048)) {
+  if (!makeCert(&ca, &ca, CA_SUBJ, CA_SUBJ, 1, "20200101000000", "20400101000000", nullptr, nullptr, crtPem, 2048)) {
     Serial.println("cert: authority certificate failed");
     goto done;
   }
@@ -200,8 +218,8 @@ static void tlsPrepareBody() {
     LittleFS.remove("/srv.key");
     LittleFS.remove("/srv.dates");
   }
-  char dates[20];
-  bool datesOk = readFile("/srv.dates", dates, sizeof dates) && strcmp(dates, CERT_NOT_AFTER) == 0;
+  char dates[32];
+  bool datesOk = readFile("/srv.dates", dates, sizeof dates) && strcmp(dates, CERT_NOT_AFTER CERT_LAYOUT) == 0;
   if (pairOk("/srv.crt", "/srv.key") && datesOk) {
     Serial.println("cert: already on the board");
     return;
@@ -236,39 +254,40 @@ void tlsPrepare() {
   certDone = nullptr;
 }
 
-// ---- port 443 repeats the request to the page on port 80 -------------------------------------
+// ---- wss://<board>/ws: each text message is one request to the page's own API ------------------
+//
+//   browser -> board   "<id> <GET|POST> /api/...[ f]\n<body>"    (id: digits, chosen by the page; " f" = form-encoded body, else plain text)
+//   board -> browser   "<id> <status>\n<body>"                    (the same id; body as the API returns it)
+//
+// The status and body are exactly what the plain http API returns, so the page uses one set of
+// calls whichever way it reaches the board. Only /api/ paths pass; firmware upload (/update) does not.
 
-static bool matchAny(const char*, const char*, size_t) { return true; }
+#define WS_MAX_MSG 40000      // largest request or answer; a full set of saved timers is about 32 kB
 
-static const char* methodName(int m) {
-  switch (m) {
-    case HTTP_GET: return "GET";
-    case HTTP_POST: return "POST";
-    case HTTP_PUT: return "PUT";
-    case HTTP_DELETE: return "DELETE";
-    case HTTP_HEAD: return "HEAD";
-    default: return nullptr;
-  }
-}
-
-static bool headerIs(const char* name, const char* want) {
-  while (*name && *want) {
-    char a = (*name >= 'A' && *name <= 'Z') ? (char)(*name + 32) : *name;
-    char b = (*want >= 'A' && *want <= 'Z') ? (char)(*want + 32) : *want;
-    if (a != b) return false;
-    name++;
-    want++;
-  }
-  return *name == 0 && *want == 0;
-}
-
-static const TlsAsset* gAssets = nullptr;
-static size_t gNAssets = 0;
 static const TlsJson* gJson = nullptr;
 static size_t gNJson = 0;
 
-void tlsRoutes(const TlsAsset* assets, size_t nAssets, const TlsJson* json, size_t nJson) {
-  gAssets = assets; gNAssets = nAssets; gJson = json; gNJson = nJson;
+void tlsRoutes(const TlsJson* json, size_t nJson) { gJson = json; gNJson = nJson; }
+
+// Pages allowed to open the socket. A browser always sends Origin; programs that send none are let in.
+static bool originOk(httpd_req_t* req) {
+  char o[96];
+  if (httpd_req_get_hdr_value_len(req, "Origin") == 0) return true;
+  if (httpd_req_get_hdr_value_str(req, "Origin", o, sizeof o) != ESP_OK) return false;
+  static const char* const ok[] = {"https://combsbw.github.io", "https://" TLS_HOST, "https://192.168.4.1"};
+  for (const char* a : ok) if (strcmp(o, a) == 0) return true;
+  return false;
+}
+
+// Our own address on whichever network the board is on (it is either on the home Wi-Fi or running its own).
+static IPAddress selfIp() {
+  return WiFi.status() == WL_CONNECTED ? WiFi.localIP() : WiFi.softAPIP();
+}
+
+static bool pathUsable(const char* p) {
+  if (strncmp(p, "/api/", 5) != 0) return false;
+  for (const char* c = p; *c; c++) if ((unsigned char)*c <= 0x20 || (unsigned char)*c >= 0x7f) return false;
+  return strlen(p) < 200;
 }
 
 static bool uriIs(const char* uri, const char* want) {
@@ -276,219 +295,189 @@ static bool uriIs(const char* uri, const char* want) {
   return strncmp(uri, want, n) == 0 && (uri[n] == 0 || uri[n] == '?');
 }
 
-// ESP_ERR_NOT_FOUND = not one of ours, relay it. Anything else is the result of answering it here.
-static esp_err_t answerHere(httpd_req_t* req) {
-  if (!req->uri) return ESP_ERR_NOT_FOUND;
-  if (req->method == HTTP_GET || req->method == HTTP_HEAD) {
-    for (size_t i = 0; i < gNAssets; i++) {
-      const TlsAsset& a = gAssets[i];
-      if (!uriIs(req->uri, a.uri)) continue;
-      httpd_resp_set_type(req, a.type);
-      if (a.gzip) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-      httpd_resp_set_hdr(req, "Cache-Control", a.cache);
-      /* One complete response with Content-Length: the home-screen icon fetch only keeps pictures that have one. */
-      return httpd_resp_send(req, req->method == HTTP_HEAD ? nullptr : (const char*)a.data, req->method == HTTP_HEAD ? 0 : (ssize_t)a.len);
-    }
-  }
-  for (size_t i = 0; i < gNJson; i++) {
-    const TlsJson& j = gJson[i];
-    if ((j.post ? HTTP_POST : HTTP_GET) != req->method || !uriIs(req->uri, j.uri)) continue;
-    char buf[400];
-    int n = j.fn(buf, sizeof buf);
-    if (n < 0) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "state");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, buf, n);
-  }
-  return ESP_ERR_NOT_FOUND;
-}
-
-static esp_err_t proxyReq(httpd_req_t* req) {
-  esp_err_t here = answerHere(req);
-  if (here != ESP_ERR_NOT_FOUND) return here;
-  const char* method = methodName(req->method);
-  if (!method || !req->uri) return httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED, "method");
-
-  /* req->uri already includes ?query. Adding it again makes Start look like a request with no command. */
-  const char* target = req->uri;
-  char query[200];
-  char targetBuf[700];
-  query[0] = 0;
-  if (!strchr(req->uri, '?')) {
-    int qlen = httpd_req_get_url_query_len(req);
-    if (qlen > 0 && qlen < (int)sizeof query && httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK) {
-      snprintf(targetBuf, sizeof targetBuf, "%s?%s", req->uri, query);
-      target = targetBuf;
-    }
-  }
-
-  char host[80];
-  host[0] = 0;
-  if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof host) != ESP_OK) strncpy(host, TLS_HOST, sizeof host);
-
-  char ctype[80];
-  ctype[0] = 0;
-  httpd_req_get_hdr_value_str(req, "Content-Type", ctype, sizeof ctype);
-
+// Repeats the request to the page on port 80. On success *out is a malloc'd buffer holding "<id> <status>\n<body>".
+static bool relay(const char* id, const char* method, const char* path, bool form, const uint8_t* body, size_t blen, uint8_t** out, size_t* outLen) {
+  *out = nullptr;
   WiFiClient client;
   client.setTimeout(15000);
-  if (!client.connect(WiFi.localIP(), 80)) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "page unavailable");
-
-  char head[900];
-  int hlen = snprintf(head, sizeof head, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %u\r\n",
-                      method, target, host, (unsigned)req->content_len);
-  if (hlen < 0 || hlen >= (int)sizeof head) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
-  if (req->content_len) {
-    int n = snprintf(head + hlen, sizeof head - hlen, "Content-Type: %s\r\n", ctype[0] ? ctype : "application/octet-stream");
-    if (n < 0 || hlen + n >= (int)sizeof head) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
-    hlen += n;
-  }
-  if (hlen + 2 >= (int)sizeof head) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
-  memcpy(head + hlen, "\r\n", 2);
-  hlen += 2;
-  if (client.write((const uint8_t*)head, hlen) != (size_t)hlen) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "request"); }
-  client.flush();
-
-  uint8_t* buf = (uint8_t*)malloc(1024);
-  if (!buf) { client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "memory"); }
-  size_t left = req->content_len;
-  while (left) {
-    int want = left > 1024 ? 1024 : (int)left;
-    int n = httpd_req_recv(req, (char*)buf, want);
-    if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-    if (n <= 0) { free(buf); client.stop(); return ESP_FAIL; }
-    int off = 0;
-    while (off < n) {
-      int w = client.write(buf + off, n - off);
-      if (w <= 0) { free(buf); client.stop(); return ESP_FAIL; }
-      off += w;
-    }
-    left -= (size_t)n;
+  if (!client.connect(selfIp(), 80)) return false;
+  char head[400];
+  int hlen = snprintf(head, sizeof head, "%s %s HTTP/1.1\r\nHost: " TLS_HOST "\r\nConnection: close\r\nContent-Type: %s\r\nContent-Length: %u\r\n\r\n",
+                      method, path, form ? "application/x-www-form-urlencoded" : "text/plain", (unsigned)blen);
+  if (hlen <= 0 || hlen >= (int)sizeof head) { client.stop(); return false; }
+  if (client.write((const uint8_t*)head, hlen) != (size_t)hlen) { client.stop(); return false; }
+  size_t off = 0;
+  while (off < blen) {
+    size_t chunk = blen - off > 1024 ? 1024 : blen - off;
+    int w = client.write(body + off, chunk);
+    if (w <= 0) { client.stop(); return false; }
+    off += (size_t)w;
   }
   client.flush();
 
-  char* hdr = (char*)malloc(2048);
-  if (!hdr) { free(buf); client.stop(); return ESP_FAIL; }
-  size_t hn = 0;
+  size_t cap = 2048;                     /* grows as the answer arrives; most are a few hundred bytes */
+  uint8_t* buf = (uint8_t*)malloc(cap);
+  if (!buf) { client.stop(); return false; }
+  size_t n = 0;
   uint32_t deadline = millis() + 15000;
-  bool gotHdr = false;
-  while (hn + 1 < 2048 && (int32_t)(millis() - deadline) < 0) {
-    if (!client.available()) {
+  while ((int32_t)(millis() - deadline) < 0) {
+    int a = client.available();
+    if (a <= 0) {
       if (!client.connected()) break;
       delay(2);
       continue;
     }
-    int b = client.read();
-    if (b < 0) break;
-    hdr[hn++] = (char)b;
-    if (hn >= 4 && memcmp(hdr + hn - 4, "\r\n\r\n", 4) == 0) { gotHdr = true; break; }
+    if (n + 1 + (size_t)a > cap) {
+      size_t want = cap;
+      while (n + 1 + (size_t)a > want) want *= 2;
+      if (want > WS_MAX_MSG + 1024) want = WS_MAX_MSG + 1024;
+      if (n + 1 >= want) { free(buf); client.stop(); return false; }   /* bigger than any answer we send */
+      uint8_t* bigger = (uint8_t*)realloc(buf, want);
+      if (!bigger) { free(buf); client.stop(); return false; }
+      buf = bigger;
+      cap = want;
+    }
+    int r = client.read(buf + n, cap - 1 - n);
+    if (r <= 0) break;
+    n += (size_t)r;
+    deadline = millis() + 15000;
   }
-  hdr[hn] = 0;
-  if (!gotHdr) { free(hdr); free(buf); client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no response"); }
-
-  char* lineEnd = strstr(hdr, "\r\n");
-  char* status = strchr(hdr, ' ');
-  if (!lineEnd || !status || status > lineEnd) { free(hdr); free(buf); client.stop(); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "bad response"); }
-  *lineEnd = 0;
-  httpd_resp_set_status(req, status + 1);
-
-  long bodyLen = -1;
-  char hname[8][32];
-  char hval[8][128];
-  int hcount = 0;
-  char* p = lineEnd + 2;
-  while (*p && *p != '\r') {
-    char* nl = strstr(p, "\r\n");
-    if (!nl) break;
-    *nl = 0;
-    char* colon = strchr(p, ':');
-    if (colon) {
-      *colon = 0;
-      char* val = colon + 1;
-      while (*val == ' ') val++;
-      if (headerIs(p, "content-length")) bodyLen = strtol(val, nullptr, 10);
-      else if (!headerIs(p, "connection") && !headerIs(p, "keep-alive") && !headerIs(p, "transfer-encoding")) {
-        if (headerIs(p, "content-type")) httpd_resp_set_type(req, val);
-        else if (hcount < 8 && strlen(p) < sizeof hname[0] && strlen(val) < sizeof hval[0]) {
-          strncpy(hname[hcount], p, sizeof hname[0]);
-          strncpy(hval[hcount], val, sizeof hval[0]);
-          httpd_resp_set_hdr(req, hname[hcount], hval[hcount]);
-          hcount++;
-        }
+  client.stop();
+  buf[n] = 0;
+  if (n < 12 || memcmp(buf, "HTTP/1.", 7) != 0) { free(buf); return false; }
+  int status = atoi((const char*)buf + 9);
+  const char* split = strstr((const char*)buf, "\r\n\r\n");
+  if (status < 100 || status > 599 || !split) { free(buf); return false; }
+  const char* b = split + 4;
+  size_t bl = n - (size_t)(b - (const char*)buf);
+  /* a body shorter than its Content-Length means the answer was cut off */
+  for (const char* h = (const char*)buf; h < split; h++) {
+    if (h[0] == '\r' && h[1] == '\n' && strncasecmp(h + 2, "content-length:", 15) == 0) {
+      long want = strtol(h + 17, nullptr, 10);
+      if (want >= 0 && (size_t)want != bl) {
+        if ((size_t)want > bl) { free(buf); return false; }
+        bl = (size_t)want;
       }
+      break;
     }
-    p = nl + 2;
   }
+  size_t idLen = strlen(id);
+  uint8_t* msg = (uint8_t*)malloc(idLen + 8 + bl);
+  if (!msg) { free(buf); return false; }
+  int p = snprintf((char*)msg, idLen + 8, "%s %d\n", id, status);
+  memcpy(msg + p, b, bl);
+  free(buf);
+  *out = msg;
+  *outLen = (size_t)p + bl;
+  return true;
+}
 
-  /* The home-screen icon is fetched by a separate iOS process. It keeps a picture only when the
-     response has Content-Length. Chunked pictures become the letter icon. The page itself is fine either way. */
-  bool headOnly = req->method == HTTP_HEAD;
-  if (req->uri && strstr(req->uri, ".png")) httpd_resp_set_type(req, "image/png");
-  if (headOnly || bodyLen == 0) {
-    httpd_resp_send(req, "", 0);
-  } else if (bodyLen > 0 && bodyLen <= 65536) {
-    uint8_t* body = (uint8_t*)malloc((size_t)bodyLen);
-    size_t got = 0;
-    while (body && got < (size_t)bodyLen) {
-      if (!client.available()) {
-        if (!client.connected() || (int32_t)(millis() - deadline) >= 0) break;
-        delay(2);
-        continue;
-      }
-      int n = client.read(body + got, (size_t)bodyLen - got);
-      if (n <= 0) break;
-      got += (size_t)n;
-      deadline = millis() + 15000;
-    }
-    if (!body || got != (size_t)bodyLen) {
-      free(body);
-      free(hdr);
-      free(buf);
-      client.stop();
-      return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "short response");
-    }
-    esp_err_t sent = httpd_resp_send(req, (const char*)body, (ssize_t)bodyLen);
-    free(body);
-    if (sent != ESP_OK) {
-      free(hdr);
-      free(buf);
-      client.stop();
+static esp_err_t sendText(httpd_req_t* req, const char* s, size_t n) {
+  httpd_ws_frame_t f = {};
+  f.type = HTTPD_WS_TYPE_TEXT;
+  f.payload = (uint8_t*)s;
+  f.len = n;
+  return httpd_ws_send_frame(req, &f);
+}
+
+static esp_err_t sendError(httpd_req_t* req, const char* id, int status, const char* why) {
+  char m[96];
+  int n = snprintf(m, sizeof m, "%s %d\n{\"ok\":false,\"err\":\"%s\"}", id, status, why);
+  return sendText(req, m, (size_t)n);
+}
+
+static esp_err_t wsReq(httpd_req_t* req) {
+  if (req->method == HTTP_GET) {                 /* the upgrade has just been accepted */
+    if (!originOk(req)) {
+      Serial.println("wss: refused a page from another site");
+      httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
       return ESP_FAIL;
     }
-  } else {
-    size_t remain = bodyLen > 0 ? (size_t)bodyLen : (size_t)-1;
-    while (remain) {
-      if (!client.available()) {
-        if (!client.connected()) break;
-        if ((int32_t)(millis() - deadline) >= 0) break;
-        delay(2);
-        continue;
-      }
-      int want = remain < 1024 ? (int)remain : 1024;
-      int n = client.read(buf, want);
-      if (n <= 0) break;
-      if (httpd_resp_send_chunk(req, (const char*)buf, n) != ESP_OK) break;
-      if (bodyLen > 0) remain -= (size_t)n;
-      deadline = millis() + 15000;
-    }
-    httpd_resp_send_chunk(req, nullptr, 0);
+    return ESP_OK;
   }
-  free(hdr);
-  free(buf);
-  client.stop();
-  return ESP_OK;
+  httpd_ws_frame_t f = {};
+  f.type = HTTPD_WS_TYPE_TEXT;
+  esp_err_t r = httpd_ws_recv_frame(req, &f, 0);
+  if (r != ESP_OK) return r;
+  if (f.len == 0) return ESP_OK;
+  if (f.len > WS_MAX_MSG || !f.final || f.type != HTTPD_WS_TYPE_TEXT) {
+    if (f.len <= WS_MAX_MSG) {      /* read and drop a frame we do not use, so the stream stays in step */
+      uint8_t* junk = (uint8_t*)malloc(f.len + 1);
+      if (junk) { f.payload = junk; httpd_ws_recv_frame(req, &f, f.len); free(junk); }
+      return ESP_OK;
+    }
+    return ESP_FAIL;                              /* too big: close the socket */
+  }
+  uint8_t* msg = (uint8_t*)malloc(f.len + 1);
+  if (!msg) return ESP_FAIL;
+  f.payload = msg;
+  r = httpd_ws_recv_frame(req, &f, f.len);
+  if (r != ESP_OK) { free(msg); return r; }
+  msg[f.len] = 0;
+
+  /* "<id> <METHOD> <path>\n<body>" */
+  char* line = (char*)msg;
+  char* nl = strchr(line, '\n');
+  const uint8_t* body = (const uint8_t*)(nl ? nl + 1 : line + f.len);
+  size_t blen = (size_t)(msg + f.len - body);
+  if (nl) *nl = 0;
+  char* sp1 = strchr(line, ' ');
+  char* sp2 = sp1 ? strchr(sp1 + 1, ' ') : nullptr;
+  char id[12];
+  id[0] = 0;
+  if (sp1 && (size_t)(sp1 - line) > 0 && (size_t)(sp1 - line) < sizeof id) { memcpy(id, line, (size_t)(sp1 - line)); id[sp1 - line] = 0; }
+  bool idOk = id[0] != 0;
+  for (const char* c = id; *c; c++) if (*c < '0' || *c > '9') idOk = false;
+  if (!idOk) { free(msg); return ESP_OK; }        /* cannot answer a request that has no id */
+  if (!sp2) { free(msg); return sendError(req, id, 400, "bad request"); }
+  *sp2 = 0;
+  const char* method = sp1 + 1;
+  char* path = sp2 + 1;
+  char* sp3 = strchr(path, ' ');                  /* optional " f": the body is form-encoded; otherwise it is plain text (JSON) */
+  bool form = false;
+  if (sp3) { *sp3 = 0; form = sp3[1] == 'f'; }
+  bool post = strcmp(method, "POST") == 0;
+  if ((!post && strcmp(method, "GET") != 0) || !pathUsable(path)) { free(msg); return sendError(req, id, 400, "bad request"); }
+
+  for (size_t i = 0; i < gNJson; i++) {          /* the status poll and wake are answered here, without a trip through port 80 */
+    const TlsJson& j = gJson[i];
+    if (j.post != (post ? 1 : 0) || !uriIs(path, j.uri)) continue;
+    char out[460];
+    int hn = snprintf(out, sizeof out, "%s 200\n", id);
+    int n = j.fn(out + hn, sizeof out - (size_t)hn);
+    free(msg);
+    if (n < 0) return sendError(req, id, 500, "state");
+    return sendText(req, out, (size_t)(hn + n));
+  }
+
+  uint8_t* answer = nullptr;
+  size_t alen = 0;
+  bool got = relay(id, method, path, form, body, blen, &answer, &alen);
+  free(msg);
+  if (!got) return sendError(req, id, 502, "board did not answer");
+  r = sendText(req, (const char*)answer, alen);
+  free(answer);
+  return r;
+}
+
+// https://<board>/ in a browser: a short note, handy for checking that the certificate is trusted.
+static esp_err_t noteReq(httpd_req_t* req) {
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  static const char page[] = "<!doctype html><meta name=viewport content=\"width=device-width\"><title>Beacon Timer</title>"
+    "<body style=\"font:16px system-ui;padding:24px\"><h3>Beacon Timer</h3><p>The secure link is up and this phone trusts it.</p>"
+    "<p>Open the Beacon Timer app and choose Connect. The timer's own page: <a href=\"http://" TLS_HOST "/app\">/app</a></p>";
+  return httpd_resp_send(req, page, sizeof page - 1);
 }
 
 bool tlsStart() {
   if (https) return true;
-  if (WiFi.status() != WL_CONNECTED) return false;
   char* crt = (char*)malloc(4096);
   char* key = (char*)malloc(2048);
   char* ca = (char*)malloc(2048);
   bool started = false;
   if (!crt || !key || !ca) goto done;
   if (!readFile("/srv.crt", crt, 3000) || !readFile("/srv.key", key, 2048) || !readFile("/ca.crt", ca, 2048)) {
-    Serial.println("https: no certificate");
+    Serial.println("wss: no certificate");
     goto done;
   }
   if (strlen(crt) + strlen(ca) + 2 >= 4096) goto done;
@@ -496,14 +485,13 @@ bool tlsStart() {
 
   {
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
-    conf.httpd.uri_match_fn = matchAny;
     conf.httpd.max_open_sockets = 3;       /* each TLS connection holds about 40 kB of RAM (16 kB in, 16 kB out) */
-    conf.httpd.max_uri_handlers = 8;
+    conf.httpd.max_uri_handlers = 4;
     conf.httpd.stack_size = 20480;
     conf.httpd.ctrl_port = 32769;
     conf.httpd.recv_wait_timeout = 5;      /* one silent connection holds up every other until this runs out */
     conf.httpd.send_wait_timeout = 5;
-    conf.httpd.lru_purge_enable = true;
+    conf.httpd.lru_purge_enable = true;    /* a phone that vanished without closing its socket gets its place taken */
     conf.cacert_pem = (const uint8_t*)crt;
     conf.cacert_len = strlen(crt) + 1;
     conf.prvtkey_pem = (const uint8_t*)key;
@@ -511,24 +499,26 @@ bool tlsStart() {
 
     httpd_handle_t handle = nullptr;
     if (httpd_ssl_start(&handle, &conf) != ESP_OK) {
-      Serial.println("https: server did not start");
+      Serial.println("wss: server did not start");
       goto done;
     }
-    httpd_uri_t route = {};
-    route.uri = "/";
-    route.handler = proxyReq;
-    const httpd_method_t methods[] = { HTTP_GET, HTTP_POST, HTTP_PUT, HTTP_DELETE, HTTP_HEAD };
-    for (httpd_method_t m : methods) {
-      route.method = m;
-      if (httpd_register_uri_handler(handle, &route) != ESP_OK) {
-        httpd_ssl_stop(handle);
-        Serial.println("https: route failed");
-        goto done;
-      }
+    httpd_uri_t ws = {};
+    ws.uri = "/ws";
+    ws.method = HTTP_GET;
+    ws.handler = wsReq;
+    ws.is_websocket = true;
+    httpd_uri_t note = {};
+    note.uri = "/";
+    note.method = HTTP_GET;
+    note.handler = noteReq;
+    if (httpd_register_uri_handler(handle, &ws) != ESP_OK || httpd_register_uri_handler(handle, &note) != ESP_OK) {
+      httpd_ssl_stop(handle);
+      Serial.println("wss: route failed");
+      goto done;
     }
     https = handle;
     started = true;
-    Serial.println("https: listening on 443");
+    Serial.println("wss: listening on 443");
   }
 done:
   wipe(key, key ? 2048 : 0);

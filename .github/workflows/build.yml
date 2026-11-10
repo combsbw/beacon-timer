@@ -26,10 +26,9 @@ jobs:
       - name: Install ESP32 core 2.0.17
         run: make deps
 
-      - name: Rebuild the embedded web page and icons
+      - name: Rebuild the embedded web page and the Pages site
         run: |
           python3 tools/embed_ui.py
-          python3 tools/embed_icons.py
           python3 tools/build_pages.py
           git diff --exit-code -- docs
 
