@@ -460,6 +460,8 @@ a.fbtn{text-decoration:none;width:fit-content}
             <div class="ph"><svg class="ic"><use href="#i-link"/></svg><span>Secure link for the app</span></div>
             <p class="note" id="certNote"></p>
             <a class="fbtn primary" id="certBtn" href="/beacon.mobileconfig" hidden>Install certificate</a>
+            <button class="fbtn" id="secTest" type="button" hidden><svg class="ic"><use href="#i-wifi"/></svg><span>Test secure link</span></button>
+            <p class="note" id="secOut" aria-live="polite"></p>
           </div>
           <div class="pcard" id="upCard">
             <div class="ph"><svg class="ic"><use href="#i-wifi"/></svg><span>Online update</span><span class="mono" id="upLast" style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)"></span></div>
@@ -1319,7 +1321,7 @@ const WS_OK=!DEV_LIKE&&/^https?:$/.test(location.protocol)&&typeof WebSocket==='
 const TARGETS={home:{host:'beacon-timer.local'},ap:{host:'192.168.4.1'}};
 function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
 function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
-const WS={sock:null,opening:null,abort:null,id:0,wait:new Map(),target:lsGet('beacon.target')==='ap'?'ap':'home',auto:lsGet('beacon.auto')==='1'};
+const WS={sock:null,opening:null,abort:null,why:null,id:0,wait:new Map(),target:lsGet('beacon.target')==='ap'?'ap':'home',auto:lsGet('beacon.auto')==='1'};
 const devHost=()=>WS_OK?TARGETS[WS.target].host:location.host;
 function wsDrop(why){
   const s=WS.sock, ab=WS.abort; WS.sock=null; WS.opening=null; WS.abort=null;
@@ -1334,15 +1336,15 @@ function wsOpen(){
   const url='wss://'+TARGETS[WS.target].host+'/ws';
   const pr=new Promise((res,rej)=>{
     let s=null, done=false;
-    const fail=e=>{ if(done) return; done=true; clearTimeout(to); if(WS.opening===pr) WS.opening=null; if(WS.sock===s) WS.sock=null; WS.abort=null;
+    const fail=e=>{ if(done) return; done=true; clearTimeout(to); WS.why={kind:/timeout/.test(e.message)?'timeout':'refused',ms:Date.now()-t0,url}; if(WS.opening===pr) WS.opening=null; if(WS.sock===s) WS.sock=null; WS.abort=null;
       if(s){ s.onopen=s.onmessage=s.onclose=s.onerror=null; try{ s.close(); }catch(x){} } rej(e); };
-    const to=setTimeout(()=>fail(new Error('connect timeout')),6000);
+    const t0=Date.now(), to=setTimeout(()=>fail(new Error('connect timeout')),12000);   /* long enough to answer the phone's local-network question */
     WS.abort=fail;
     try{ s=new WebSocket(url); }catch(e){ fail(e); return; }
     WS.sock=s;
     s.onopen=()=>{ if(done) return; done=true; clearTimeout(to); WS.opening=null; WS.abort=null; res(s); };
     s.onerror=()=>fail(new Error('socket'));
-    s.onclose=()=>{ if(!done) fail(new Error('closed')); else if(WS.sock===s) wsDrop('closed'); };
+    s.onclose=()=>{ if(!done) fail(new Error('closed')); else if(WS.sock===s){ if(Date.now()-t0<3000) WS.why={kind:'closed',ms:Date.now()-t0,url}; wsDrop('closed'); } };
     s.onmessage=ev=>wsMsg(ev.data);
   });
   WS.opening=pr;
@@ -1600,8 +1602,29 @@ function renderCert(){
   if(!DEV_LIKE||location.protocol!=='http:'){ card.hidden=true; return; }
   card.hidden=false;
   btn.hidden=false;
+  $('#secTest').hidden=false;
   note.textContent='The installed app (GitHub Pages) talks to the timer over a secure link, so the phone has to trust the timer’s certificate once. In Safari, while the timer is on this Wi-Fi, tap Install certificate and allow the profile. Open Settings, tap Profile Downloaded at the top, then Install. Then go to Settings, General, About, Certificate Trust Settings, and turn Beacon Timer on. When the app first connects the phone may ask to find devices on the local network: allow it. If Profile Downloaded is missing, tap Install certificate again. It only stays available for a few minutes. The trust stays across firmware updates.';
 }
+async function secTest(){
+  const out=$('#secOut'), btn=$('#secTest'); btn.disabled=true; out.textContent='Testing…';
+  let i0=null; try{ i0=await api('/api/secure',{timeout:4000}); }catch(e){}
+  const t0=performance.now();
+  const res=await new Promise(r=>{
+    let s, to=setTimeout(()=>{ try{ s.close(); }catch(e){} r('timeout'); },10000);
+    try{ s=new WebSocket('wss://'+location.hostname+'/ws'); }catch(e){ clearTimeout(to); r('error'); return; }
+    s.onopen=()=>{ clearTimeout(to); try{ s.close(); }catch(e){} r('open'); };
+    s.onerror=()=>{ clearTimeout(to); r('error'); };
+  });
+  const ms=Math.round(performance.now()-t0);
+  let i1=null; try{ i1=await api('/api/secure',{timeout:4000}); }catch(e){}
+  const seen=i1?(' The timer has accepted '+i1.opened+' secure connection'+(i1.opened===1?'':'s')+' since it started.'):'';
+  if(res==='open') out.textContent='Works: this phone trusts the certificate and the timer answered over the secure link ('+ms+' ms).'+seen+' If the installed app still cannot connect, the cause is on the app side (its Local Network permission, or the Wi-Fi it is on).';
+  else if(i1&&!i1.running) out.textContent='The timer’s secure server is not running (it did not start). Restart the timer and test again; if it stays this way the memory or certificate step failed at boot.';
+  else if(res==='timeout') out.textContent='The secure link did not answer within 10 s.'+seen+' Make sure the timer is awake (tap Connect on the main screen first) and try again.';
+  else out.textContent='The phone turned the secure link down after '+ms+' ms, and the timer is running it.'+seen+' So the phone does not trust the certificate. Go to Settings > General > About > Certificate Trust Settings and switch Beacon Timer on. If it is already on, delete the Beacon Timer profile (Settings > General > VPN & Device Management), then tap Install certificate again and re-enable trust.';
+  btn.disabled=false;
+}
+$('#secTest').addEventListener('click',secTest);
 async function netLoad(){
   if(!DEV.on){ NET.info=null; NET.key=''; renderNet(); return; }
   try{ NET.info=await api('/api/net'); NET.key=''; }catch(e){}
@@ -1680,12 +1703,19 @@ function renderLink(){
   lkOff.hidden=!(DEV.on||WS.auto);
   lkPage.href='http://'+T.host+'/app';
   lkNote.textContent=CONN.fail
-    ? 'Could not reach '+T.host+'. Check that this phone is on '+(home?'the same Wi-Fi as the timer':'the Beacon-timer Wi-Fi')+', that the timer has power, and that its certificate is installed (open the timer’s own page, then “Secure link for the app”).'
+    ? failNote(T.host,home)
     : DEV.on
       ? 'Connected to '+T.host+' over a secure link. It reconnects by itself when this app opens or the network comes back.'
       : home
         ? 'For a timer that has joined your home Wi-Fi. This phone must be on that Wi-Fi. The timer’s own page is where you join it to your Wi-Fi and install its certificate.'
         : 'For the timer’s own Beacon-timer Wi-Fi (no internet there, so this app opens from its saved copy). Join Beacon-timer on this phone first.';
+}
+function failNote(host,home){
+  const w=WS.why, net=home?'the same Wi-Fi as the timer':'the Beacon-timer Wi-Fi';
+  if(w&&w.kind==='timeout') return 'No answer from '+host+' after '+Math.round(w.ms/1000)+' s. Check that this phone is on '+net+' and the timer has power. On iPhone, also look in Settings > Privacy & Security > Local Network and make sure this app is switched on.';
+  if(w&&w.kind==='closed') return 'The timer opened the secure link to '+host+' and closed it straight away. It does that for an app opened from an address other than https://combsbw.github.io, so check the address this app was installed from.';
+  if(w) return 'The phone turned the secure link to '+host+' down after '+(w.ms<1000?'under a second':Math.round(w.ms/1000)+' s')+'. That is usually the certificate: on the timer’s own page, tap “Test secure link” (Settings > Device) to find out which part is failing.';
+  return 'Could not reach '+host+'. Check that this phone is on '+net+' and the timer has power.';
 }
 function devDisconnect(){
   WS.auto=false; lsSet('beacon.auto','0');

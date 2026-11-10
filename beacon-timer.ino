@@ -883,6 +883,13 @@ void setup() {
   server.on("/app", HTTP_GET, handleRoot);        // the same page under a name that works on any network
   server.on("/beacon.mobileconfig", HTTP_GET, handleCertProfile);
   server.on("/api/state", HTTP_GET, sendState);
+  server.on("/api/secure", HTTP_GET, []() {                         // is the secure server up, and has any phone got through to it
+    uint32_t o, r;
+    tlsStats(&o, &r);
+    char b[120];
+    snprintf(b, sizeof b, "{\"running\":%s,\"opened\":%u,\"refused\":%u,\"v\":\"%s\"}", tlsRunning() ? "true" : "false", (unsigned)o, (unsigned)r, FW_VERSION);
+    server.send(200, "application/json", b);
+  });
   server.on("/api/net", HTTP_GET, handleNetInfo);
   server.on("/api/net", HTTP_POST, handleNetPost);
   server.on("/api/power", HTTP_POST, handlePower);

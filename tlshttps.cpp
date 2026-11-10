@@ -264,6 +264,7 @@ void tlsPrepare() {
 
 #define WS_MAX_MSG 40000      // largest request or answer; a full set of saved timers is about 32 kB
 
+static uint32_t gOpened = 0, gRefused = 0;
 static const TlsJson* gJson = nullptr;
 static size_t gNJson = 0;
 
@@ -274,7 +275,7 @@ static bool originOk(httpd_req_t* req) {
   char o[96];
   if (httpd_req_get_hdr_value_len(req, "Origin") == 0) return true;
   if (httpd_req_get_hdr_value_str(req, "Origin", o, sizeof o) != ESP_OK) return false;
-  static const char* const ok[] = {"https://combsbw.github.io", "https://" TLS_HOST, "https://192.168.4.1"};
+  static const char* const ok[] = {"https://combsbw.github.io", "https://" TLS_HOST, "https://192.168.4.1", "http://" TLS_HOST, "http://192.168.4.1"};   /* the last two: the board's own page testing the link */
   for (const char* a : ok) if (strcmp(o, a) == 0) return true;
   return false;
 }
@@ -389,10 +390,12 @@ static esp_err_t sendError(httpd_req_t* req, const char* id, int status, const c
 static esp_err_t wsReq(httpd_req_t* req) {
   if (req->method == HTTP_GET) {                 /* the upgrade has just been accepted */
     if (!originOk(req)) {
+      gRefused++;
       Serial.println("wss: refused a page from another site");
       httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
       return ESP_FAIL;
     }
+    gOpened++;
     return ESP_OK;
   }
   httpd_ws_frame_t f = {};
@@ -527,6 +530,9 @@ done:
   free(ca);
   return started;
 }
+
+bool tlsRunning() { return https != nullptr; }
+void tlsStats(uint32_t* opened, uint32_t* refused) { *opened = gOpened; *refused = gRefused; }
 
 void tlsStop() {
   if (!https) return;
