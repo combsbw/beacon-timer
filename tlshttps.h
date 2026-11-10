@@ -20,5 +20,10 @@ bool tlsStart();
 struct TlsJson { const char* uri; uint8_t post; int (*fn)(char* buf, size_t cap); };
 void tlsRoutes(const TlsJson* json, size_t nJson);
 
+// For the board's own page: whether the secure server is listening, and how many sockets it has accepted or refused (other site) since boot.
+// A phone that cannot trust the certificate never gets as far as being counted.
+bool tlsRunning();
+void tlsStats(uint32_t* opened, uint32_t* refused);
+
 // Frees the TLS server before an outbound HTTPS download (online update).
 void tlsStop();
