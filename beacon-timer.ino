@@ -47,7 +47,7 @@
 #include "ghupdate.h"
 #include "tlshttps.h"
 
-#define FW_VERSION "0.6.0"
+#define FW_VERSION "0.6.1"
 #define IDLE_SLEEP_MS (5UL * 60UL * 1000UL)   // home-network mode: sleep this long after the session stops
 #define STA_JOIN_MS 12000                      // per attempt; the board tries twice before it gives up and starts the access point
 #define IDLE_FIRST_MS 400                      // a new connection that has sent nothing is dropped after this if another one is waiting
@@ -118,6 +118,23 @@ static void hwWrite(int idx, const bc::Rgb& c, float b, float master) {
   }
 }
 
+// ---- the board's own LED ------------------------------------------------------------------------------------------
+// ESP32-S3 Super Mini boards carry one WS2812 RGB LED on GPIO48. Nothing here uses it, but it is never told to be dark, and its
+// data line floats: the radio's bursts while the board sleeps (a wake for every beacon) can be read as a color, which shows as a
+// blue blink. Sending "black" at start, on entering sleep, and every couple of seconds keeps it off. Skipped if one of the
+// timer's own LEDs has been assigned to that pin.
+#define ONBOARD_RGB_PIN 48
+static uint32_t onboardQuietAt = 0;
+static void quietOnboardLed() {
+  for (int i = 0; i < 2; i++) {
+    if (!hw[i].live) continue;
+    if (hw[i].com == ONBOARD_RGB_PIN) return;
+    for (int k = 0; k < 3; k++) if (hw[i].pin[k] == ONBOARD_RGB_PIN) return;
+  }
+  neopixelWrite(ONBOARD_RGB_PIN, 0, 0, 0);
+  onboardQuietAt = millis();
+}
+
 // ---- shared state -------------------------------------------------------------------------------------------------
 static bc::Engine eng;
 static SemaphoreHandle_t engMtx;
@@ -172,6 +189,7 @@ static DNSServer dns;
 static void applyHardware(const bc::Config& c) {
   hwApply(0, c.pins[0]);
   hwApply(1, c.pins[1]);
+  quietOnboardLed();
 }
 
 // ---- LED patterns while an online update runs: proof of life, which step, how far, and why it failed -----------------
@@ -214,6 +232,7 @@ static void leaveSleep() {
 static void enterSleep() {
   if (!radioSta || powerSave || otaBusy || updPhase) return;
   powerSave = true;
+  quietOnboardLed();
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);       // wakes for every DTIM beacon: multicast (the name lookup) and queued packets still arrive
 }
 
@@ -929,6 +948,7 @@ void loop() {
   server.serve();
   ArduinoOTA.handle();
   refreshIdle();
+  if ((uint32_t)(millis() - onboardQuietAt) >= 2000) quietOnboardLed();
   staWatch();
   if (radioSta && (gotIpFlag || (int32_t)(millis() - mdnsPokeAt) >= 0)) {
     gotIpFlag = false;
