@@ -154,6 +154,8 @@ canvas{display:block;width:100%}
 .sb .ic{width:18px;height:18px}
 .step input{width:60px;height:40px;text-align:center;border:1px solid var(--line);border-radius:10px;background:var(--field);font:500 16px var(--font-mono);padding:0}
 .unit{font:400 12px var(--font-mono);color:var(--muted);width:10px}
+.step.ms{gap:4px}
+.step.ms input{width:50px}
 .sw{position:relative;width:50px;height:30px;flex:none}
 .sw input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;cursor:pointer}
 .sw i{position:absolute;inset:0;border-radius:15px;background:var(--line);transition:background .15s}
@@ -677,7 +679,7 @@ const PIN_CHOICES=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,21];   /* S3 GPI
 function transProfile(){ return {breath:2,floor:6,tail:5,f0:1,f1:7,curve:3,duty0:60,duty1:30,soft0:100,soft1:0,blend:40,colors:[...PAL.trans]}; }
 function defaults(){
   return {
-    loadSec:30,transSec:15,sets:5,repeat:4,trackRepeats:false,redHold:2,skipFinal:true,
+    loadSec:30,transSec:15,sets:5,repeat:4,trackRepeats:false,mirror:0,redHold:2,skipFinal:true,
     lead:true,leadSame:true,leadSec:15,
     names:{load:'Load',trans:'Transition',lead:'Lead-in',hold:'Hold'},
     loadNames:{},transNames:{},
@@ -710,7 +712,7 @@ function normalize(raw){
     for(const k of ['loadNames','transNames']){ const o=raw[k]; if(o&&typeof o==='object') for(const [i,v] of Object.entries(o)) if(/^\d{1,2}$/.test(i)&&typeof v==='string') d[k][i]=v.slice(0,24); }
   }
   for(const k of Object.keys(d.names)) d.names[k]=String(d.names[k]).slice(0,24);
-  d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10);
+  d.loadSec=clamp(d.loadSec,3,1200); d.transSec=clamp(d.transSec,0,600); d.sets=Math.round(clamp(d.sets,1,20)); d.repeat=Math.round(clamp(d.repeat,1,20)); d.redHold=clamp(d.redHold,0,10); d.mirror=d.mirror===1?1:d.mirror===2?2:0;
   d.profiles.load.solid=clamp(d.profiles.load.solid,0,10); d.profiles.load.fade=clamp(d.profiles.load.fade,0,5);
   { const L=d.profiles.load; L.final=clamp(L.final,10,120); L.longCycle=clamp(L.longCycle,2,20); L.longDim=clamp(L.longDim,0,60); L.markEvery=L.markEvery<=0?0:clamp(L.markEvery,10,600); L.finalStyle=L.finalStyle===1?1:0; L.blinkSec=clamp(L.blinkSec,5,60); L.blinkHz=clamp(L.blinkHz,1,7); }
   d.leadSec=clamp(d.leadSec,1,600); d.holdMs=clamp(d.holdMs,0,1000); d.maxHz=clamp(d.maxHz,1,8); d.master=clamp(d.master,10,100);
@@ -813,7 +815,9 @@ function nextOf(c,win){
   return win.set>=c.sets?{set:1,rep:Math.min(c.repeat,win.rep+1)}:{set:win.set+1,rep:win.rep};
 }
 const setOf=(c,win)=>nextOf(c,win).set;
-function led2(c,win){ const n=nextOf(c,win); return {c:SET_COLORS[(c.trackRepeats?n.rep:n.set)-1],b:0.85}; }   /* solid color for the set, or for the repeat */
+/* LED 2 copies LED 1 when it has only one thing to track (one set, or one repeat when it follows repeats), when mirroring is on, or on the last repeat (mirror 2) */
+const mirrorNow=(c,win)=>trackN(c)<=1||c.mirror===1||(c.mirror===2&&nextOf(c,win).rep>=c.repeat);
+function led2(c,win,timer){ if(mirrorNow(c,win)) return {c:timer.c,b:timer.b}; const n=nextOf(c,win); return {c:SET_COLORS[(c.trackRepeats?n.rep:n.set)-1],b:0.85}; }   /* solid color for the set, or for the repeat */
 
 /* ============ timer state ============ */
 const S={state:'idle',t:0,wake:null};
@@ -880,7 +884,7 @@ function drawStage(o1,o2){
   const room=cx=>Math.min(cy-2,H-cy-2,cx-2,W-cx-2);
   drawLed(ledG,x1,cy,r1,{c:o1.c,b:o1.b*m,room:room(x1)}); drawLed(ledG,x2,cy,r2,{c:o2.c,b:o2.b*m,room:room(x2)});
   ledG.fillStyle=TH.muted; ledG.font='500 11px "IBM Plex Mono",ui-monospace,monospace'; ledG.textAlign='center';
-  ledG.fillText('TIMER',x1,cy+r1*1.17+22); ledG.fillText(cfg.trackRepeats?'REPEAT':'SET',x2,cy+r2*1.17+22);
+  ledG.fillText('TIMER',x1,cy+r1*1.17+22); ledG.fillText(trackN(cfg)<=1||cfg.mirror===1?'MIRROR':cfg.trackRepeats?'REPEAT':'SET',x2,cy+r2*1.17+22);
 }
 
 let mapCache=null,mapKey='';
@@ -1000,7 +1004,7 @@ function render(now){
       const first=implFor(cfg,PLAN.wins[0].type);
       o1={c:first.impl.first(first.prof),b:br}; o2={c:[226,236,255],b:br*0.8}; break;
     }
-    case 'run': o1=led1(cfg,win,loc.local); o2=led2(cfg,win); break;
+    case 'run': o1=led1(cfg,win,loc.local); o2=led2(cfg,win,o1); break;
     case 'pause':{
       const base=led1(cfg,win,loc.local);
       o1={c:base.c,b:0.45}; o2={c:[255,170,0],b:(nowS%1.2)<0.6?0.9:0.06}; break;
@@ -1008,7 +1012,7 @@ function render(now){
     case 'preview':{
       const span=Math.max(0.0001,Math.min(win.len-loc.local,2.5));
       const lt=loc.local+((nowS%2.5)/2.5)*span;
-      o1=led1(cfg,win,lt); o2=led2(cfg,win); break;
+      o1=led1(cfg,win,lt); o2=led2(cfg,win,o1); break;
     }
     case 'stopped': o1={c:[255,255,255],b:0}; o2={c:[255,255,255],b:0}; break;
     default:
@@ -1125,11 +1129,12 @@ document.querySelectorAll('#screenSet details').forEach(d=>d.addEventListener('t
 
 /* ============ settings: timing ============ */
 const ROWS=[
-  {id:'loadSec',label:'Load',icon:'pulse',type:'step',min:3,max:1200,step:5,unit:'s',dyn:true,hint:true},
+  {id:'loadSec',label:'Load',icon:'pulse',type:'ms',min:3,max:1200,step:5,dyn:true},
   {id:'transSec',label:'Transition',icon:'wave',type:'step',min:0,max:600,step:5,unit:'s'},
   {id:'sets',label:'Sets',icon:'repeat',type:'step',min:1,max:20,step:1,unit:'',int:true},
   {id:'repeat',label:'Repeat',icon:'loop',type:'step',min:1,max:20,step:1,unit:'×',int:true},
-  {id:'trackRepeats',label:'Set LED',icon:'dot',type:'seg',opts:[[false,'Sets'],[true,'Repeats']]},
+  {id:'trackRepeats',label:'Set LED',icon:'dot',type:'seg',opts:[[false,'Sets'],[true,'Repeats']],noteFn:()=>trackN(cfg)<=1?'mirrors timer':''},
+  {id:'mirror',label:'Mirror timer LED',icon:'dot',type:'seg',wide:true,opts:[[0,'Off'],[1,'Always'],[2,'Last repeat']],noteFn:()=>cfg.mirror===2&&cfg.repeat<=1?'1 repeat: always':''},
   {id:'redHold',label:'Hold',icon:'dot',iconCls:'red',type:'step',min:0,max:10,step:0.5,unit:'s'},
   {id:'lead',label:'Lead-in',icon:'flag',type:'switch'},
   {id:'leadSame',label:'Same as transition',icon:'link',type:'switch',when:()=>cfg.lead},
@@ -1147,7 +1152,7 @@ function buildTiming(){
   const box=$('#timingBox'); box.textContent='';
   for(const r of ROWS){
     const row=el('div','srow'); row.id='row-'+r.id;
-    row.append(el('span','sl',`${ICON(r.icon,r.iconCls)}<span>${r.label}${r.hint?'<small class="hint"></small>':''}</span>`));
+    row.append(el('span','sl',`${ICON(r.icon,r.iconCls)}<span>${r.label}${r.hint||r.noteFn?'<small class="hint"></small>':''}</span>`));
     if(r.type==='step'){
       const wrap=el('div','step'), minus=el('button','sb',ICON('minus')), plus=el('button','sb',ICON('plus')), inp=el('input');
       minus.type=plus.type='button'; minus.setAttribute('aria-label',r.label+' less'); plus.setAttribute('aria-label',r.label+' more');
@@ -1157,8 +1162,19 @@ function buildTiming(){
       minus.addEventListener('click',()=>apply(cfg[r.id]-(r.dyn?dyn(cfg[r.id]-1):r.step))); plus.addEventListener('click',()=>apply(cfg[r.id]+(r.dyn?dyn(cfg[r.id]):r.step)));
       inp.addEventListener('change',()=>apply(parseFloat(inp.value)));
       wrap.append(minus,inp,plus,el('span','unit',r.unit)); row.append(wrap); timingCtl[r.id]={inp};
+    }else if(r.type==='ms'){                                   /* minutes and seconds in two boxes, plus the same big-step buttons */
+      const wrap=el('div','step ms'), minus=el('button','sb',ICON('minus')), plus=el('button','sb',ICON('plus')), im=el('input'), is=el('input');
+      minus.type=plus.type='button'; minus.setAttribute('aria-label',r.label+' less'); plus.setAttribute('aria-label',r.label+' more');
+      for(const i of [im,is]){ i.type='number'; i.inputMode='numeric'; i.step=1; i.min=0; }
+      im.max=Math.floor(r.max/60); is.max=59; im.setAttribute('aria-label',r.label+' minutes'); is.setAttribute('aria-label',r.label+' seconds');
+      const apply=v=>{ if(!isFinite(v)){ syncTiming(); return; } cfg[r.id]=clamp(Math.round(v),r.min,r.max); commitTiming(); };
+      const dyn=v=>v>=300?30:v>=120?15:5;
+      const fromBoxes=()=>apply((parseInt(im.value,10)||0)*60+(parseInt(is.value,10)||0));
+      im.addEventListener('change',fromBoxes); is.addEventListener('change',fromBoxes);
+      minus.addEventListener('click',()=>apply(cfg[r.id]-dyn(cfg[r.id]-1))); plus.addEventListener('click',()=>apply(cfg[r.id]+dyn(cfg[r.id])));
+      wrap.append(minus,im,el('span','unit','m'),is,el('span','unit','s'),plus); row.append(wrap); timingCtl[r.id]={ms:[im,is]};
     }else if(r.type==='seg'){
-      const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',r.label); seg.style.maxWidth='190px';
+      const seg=el('div','seg'); seg.setAttribute('role','group'); seg.setAttribute('aria-label',r.label); seg.style.maxWidth=r.wide?'250px':'190px';
       const btns=r.opts.map(([v,t])=>{ const b=el('button',null,t); b.type='button'; b.addEventListener('click',()=>{ cfg[r.id]=v; syncTiming(); commitTrack(); }); seg.append(b); return [v,b]; });
       row.append(seg); timingCtl[r.id]={seg:btns};
     }else{
@@ -1171,8 +1187,9 @@ function buildTiming(){
 function syncTiming(){
   for(const r of ROWS){
     const c=timingCtl[r.id];
-    if(c.inp) c.inp.value=cfg[r.id]; else if(c.seg) c.seg.forEach(([v,b])=>b.setAttribute('aria-pressed',cfg[r.id]===v)); else c.sw.checked=c.get();
+    if(c.inp) c.inp.value=cfg[r.id]; else if(c.ms){ { const t=Math.round(cfg[r.id]); c.ms[0].value=Math.floor(t/60); c.ms[1].value=t%60; } } else if(c.seg) c.seg.forEach(([v,b])=>b.setAttribute('aria-pressed',cfg[r.id]===v)); else c.sw.checked=c.get();
     if(r.hint){ const h=$('#row-'+r.id+' .hint'); h.textContent=cfg[r.id]>=60?fmtDur(cfg[r.id]):''; }
+    if(r.noteFn){ $('#row-'+r.id+' .hint').textContent=r.noteFn(); }
     $('#row-'+r.id).hidden=r.when?!r.when():false;
   }
   $('#sec-lead').hidden=!(cfg.lead&&!cfg.leadSame);

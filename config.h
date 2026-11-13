@@ -83,6 +83,7 @@ inline void cfgLeaf(void* vctx, const char* p, char t, double v, const char* s) 
     else if (!strcmp(p, "sets")) c.sets = (int)floor(v + 0.5);
     else if (!strcmp(p, "repeat")) c.repeat = (int)floor(v + 0.5);
     else if (!strcmp(p, "trackRepeats")) c.trackRepeats = v != 0;
+    else if (!strcmp(p, "mirror")) c.mirror = (uint8_t)(v < 0.5 ? 0 : v < 1.5 ? 1 : 2);
     else if (!strcmp(p, "redHold")) c.redHold = f;
     else if (!strcmp(p, "skipFinal")) c.skipFinal = v != 0;
     else if (!strcmp(p, "lead")) c.lead = v != 0;

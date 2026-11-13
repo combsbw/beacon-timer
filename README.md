@@ -146,8 +146,13 @@ pulse train; the pulses keep running on the window clock. Both times are in Sett
 - **Set LED shows** (Settings > Timing): *Sets* steps the second LED through one color per set (default); *Repeats* gives
   it one color per repeat, so it stays one color for a whole pass and changes when the next repeat begins (the closing
   transition already shows the next repeat's color). The caption under the LED reads SET or REPEAT.
-- **Loads up to 20 minutes.** The Load length steps in 5 s (under 2 min), 15 s (2-5 min) and 30 s (over 5 min); type a
-  value for anything exact. Times of an hour or more read h:mm:ss.
+- **Mirror timer LED** (Settings > Timing): *Off* (default) leaves the Set LED as above; *Always* makes it an exact copy of the
+  Timer LED (color and brightness, every moment); *Last repeat* shows the set (or repeat) color as usual and switches to
+  an exact copy when the run reaches its last repeat (the transition leading into it included). Whatever the setting, a
+  Set LED that has only one thing to track (one set, or one repeat while following repeats) copies the Timer LED. Pause,
+  idle and done keep their own patterns. The caption reads MIRROR while it is copying all the time.
+- **Loads up to 20 minutes.** The Load length has a minutes box and a seconds box (type 1 and 30 for 1:30; 90 seconds becomes
+  1:30), and the + / − buttons step 5 s (under 2 min), 15 s (2-5 min) and 30 s (over 5 min). Times of an hour or more read h:mm:ss.
 - **Long-load lighting** (Settings > Load > Long loads). Only the last *Final* seconds (30 by default) run the accelerating
   pulse. Before that the light pulses slowly (*Cycle*, *Dim*), one color after another, each color getting an equal share
   of the time; the final stretch then starts again at the first color. A 10 min load with 4 colors is 4 shares of 2:22.5,
