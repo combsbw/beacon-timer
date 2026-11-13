@@ -100,6 +100,7 @@ struct PinCfg { int8_t r, g, b, com; bool anode; };
 struct Config {
   float loadSec, transSec;
   bool trackRepeats;           // LED 2 follows the repeat (not the set)
+  uint8_t mirror;              // LED 2 copies LED 1 instead: 0 never, 1 always, 2 only on the last repeat
   int sets, repeat;            // repeat = how many times the whole run of sets plays (1 = no repeat)
   float redHold;
   bool skipFinal, lead, leadSame;
@@ -119,7 +120,7 @@ struct Config {
     return p;
   }
   void setDefaults() {
-    loadSec = 30; transSec = 15; sets = 5; repeat = 4; trackRepeats = false; redHold = 2; skipFinal = true; lead = true; leadSame = true; leadSec = 15;
+    loadSec = 30; transSec = 15; sets = 5; repeat = 4; trackRepeats = false; mirror = 0; redHold = 2; skipFinal = true; lead = true; leadSame = true; leadSec = 15;
     holdMs = 0; maxHz = 7; master = 100;
     pins[0] = PinCfg{13, 11, 10, 12, true};    // timer LED: R=13 G=11 B=10, common anode on 12
     pins[1] = PinCfg{2, 4, 5, 3, true};        // set LED:   R=2  G=4  B=5,  common anode on 3
@@ -357,7 +358,14 @@ inline SetRep nextOf(const Config& c, const Win& w) {
 inline int setOf(const Config& c, const Win& w) { return nextOf(c, w).set; }
 // How many colors LED 2 steps through: one per set, or one per repeat.
 inline int trackN(const Config& c) { return c.trackRepeats ? c.repeat : c.sets; }
-inline Led led2(const Config& c, const Win& w, const Rgb* setCols) {
+// LED 2 shows exactly what LED 1 shows when it has only one thing to track (one set, or one repeat when it follows repeats),
+// when mirroring is on, or (mirror = 2) once the run reaches its last repeat.
+inline bool mirrorNow(const Config& c, const Win& w) {
+  if (trackN(c) <= 1 || c.mirror == 1) return true;
+  return c.mirror == 2 && nextOf(c, w).rep >= c.repeat;
+}
+inline Led led2(const Config& c, const Win& w, const Rgb* setCols, const Led& timer) {
+  if (mirrorNow(c, w)) return timer;
   SetRep n = nextOf(c, w);
   return Led{setCols[(c.trackRepeats ? n.rep : n.set) - 1], 0.85f};
 }
@@ -437,7 +445,7 @@ class Engine {
         break;
       }
       case ST_RUN: {
-        Led a = led1(cfg, win, loc.local), b = led2(cfg, win, setCols);
+        Led a = led1(cfg, win, loc.local), b = led2(cfg, win, setCols, a);
         o.c1 = a.c; o.b1 = a.b; o.c2 = b.c; o.b2 = b.b;
         break;
       }
@@ -450,7 +458,7 @@ class Engine {
       case ST_PREVIEW: {                         // loops a 2.5 s slice at the scrub position
         double span = fmax(0.0001, fmin((double)win.len - loc.local, 2.5));
         double lt = loc.local + (fmod(nowS, 2.5) / 2.5) * span;
-        Led a = led1(cfg, win, lt), b = led2(cfg, win, setCols);
+        Led a = led1(cfg, win, lt), b = led2(cfg, win, setCols, a);
         o.c1 = a.c; o.b1 = a.b; o.c2 = b.c; o.b2 = b.b;
         break;
       }

@@ -33,7 +33,7 @@ static int dump(const char* path, int samples) {
     Win w = winAt(pl, i);
     for (int k = 0; k < samples; k++) {
       double local = (double)w.len * (k + 0.5) / samples;
-      Led a = led1(c, w, local), b = led2(c, w, sc);
+      Led a = led1(c, w, local), b = led2(c, w, sc, a);
       printf("S %d %d %.4f %.4f %.4f %.5f %.3f %.3f %.3f %.3f\n", i, k, a.c.r, a.c.g, a.c.b, a.b, b.c.r, b.c.g, b.c.b, b.b);
     }
   }
@@ -231,19 +231,57 @@ static int stateTest() {
     Rgb rc[MAX_SETS]; setColors(trackN(tc), rc);
     CHECK(trackN(tc) == 4);
     Rgb sc[MAX_SETS]; setColors(tc.sets, sc);
-    Led a = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, rc);                     // set 3 of repeat 1: the repeat color, not the set color
+    const Led TM = {Rgb{10.f, 20.f, 30.f}, 0.5f};                           // stands in for the timer LED
+    Led a = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, rc, TM);                     // set 3 of repeat 1: the repeat color, not the set color
     CHECK(a.c.r == rc[0].r && a.c.g == rc[0].g);
-    Led b = led2(tc, Win{W_LOAD, 5, 2, 30.0, 0.0}, rc);
+    Led b = led2(tc, Win{W_LOAD, 5, 2, 30.0, 0.0}, rc, TM);
     CHECK(b.c.r == rc[1].r && b.c.g == rc[1].g && b.c.b == rc[1].b);
-    Led t1 = led2(tc, Win{W_TRANS, 2, 2, 15.0, 0.0}, rc);                    // between sets of repeat 2: still repeat 2
+    Led t1 = led2(tc, Win{W_TRANS, 2, 2, 15.0, 0.0}, rc, TM);                    // between sets of repeat 2: still repeat 2
     CHECK(t1.c.r == rc[1].r && t1.c.g == rc[1].g);
-    Led t2 = led2(tc, Win{W_TRANS, 5, 2, 15.0, 0.0}, rc);                    // closing transition of repeat 2: leads into repeat 3
+    Led t2 = led2(tc, Win{W_TRANS, 5, 2, 15.0, 0.0}, rc, TM);                    // closing transition of repeat 2: leads into repeat 3
     CHECK(t2.c.r == rc[2].r && t2.c.g == rc[2].g && t2.c.b == rc[2].b);
-    Led ld = led2(tc, Win{W_LEAD, 0, 1, 15.0, 0.0}, rc);                     // lead-in: repeat 1
+    Led ld = led2(tc, Win{W_LEAD, 0, 1, 15.0, 0.0}, rc, TM);                     // lead-in: repeat 1
     CHECK(ld.c.r == rc[0].r && ld.c.g == rc[0].g);
     tc.trackRepeats = false;
-    Led sb = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, sc);
+    Led sb = led2(tc, Win{W_LOAD, 3, 1, 30.0, 0.0}, sc, TM);
     CHECK(sb.c.r == sc[2].r && sb.c.g == sc[2].g);
+    // mirror: LED 2 copies LED 1
+    {
+      Config mc; mc.setDefaults();                                          // 5 sets x 4 repeats
+      Rgb mr[MAX_SETS]; setColors(trackN(mc), mr);
+      Win mid = Win{W_LOAD, 3, 2, 30.0, 0.0}, last = Win{W_LOAD, 3, 4, 30.0, 0.0}, intoLast = Win{W_TRANS, 5, 3, 15.0, 0.0};
+      Led n = led2(mc, mid, mr, TM);
+      CHECK(!(n.c.r == TM.c.r && n.c.g == TM.c.g && n.c.b == TM.c.b) && n.b == 0.85f);   // default: still the set color
+      mc.mirror = 1;
+      Led m1 = led2(mc, mid, mr, TM);
+      CHECK(m1.c.r == TM.c.r && m1.c.g == TM.c.g && m1.c.b == TM.c.b && m1.b == TM.b);   // always: exact copy
+      mc.mirror = 2;
+      Led m2 = led2(mc, mid, mr, TM);
+      CHECK(m2.b == 0.85f);                                                 // earlier repeat: set color
+      Led m3 = led2(mc, last, mr, TM);
+      CHECK(m3.c.r == TM.c.r && m3.b == TM.b);                              // last repeat: copy
+      Led m4 = led2(mc, intoLast, mr, TM);
+      CHECK(m4.c.r == TM.c.r && m4.b == TM.b);                              // closing transition that leads into the last repeat: copy
+      Led m5 = led2(mc, Win{W_TRANS, 5, 4, 15.0, 0.0}, mr, TM);
+      CHECK(m5.c.r == TM.c.r);                                              // last transition of the last repeat: copy
+      mc.mirror = 0; mc.sets = 1;                                           // one set, following sets: nothing to track, copy
+      Led o1 = led2(mc, mid, mr, TM);
+      CHECK(o1.c.r == TM.c.r && o1.b == TM.b);
+      mc.sets = 3; mc.trackRepeats = true; mc.repeat = 1;                   // one repeat, following repeats: copy
+      Led o2 = led2(mc, Win{W_LOAD, 2, 1, 30.0, 0.0}, mr, TM);
+      CHECK(o2.c.r == TM.c.r && o2.b == TM.b);
+      mc.trackRepeats = false;                                              // one repeat but following sets (3 of them): set colors
+      Led o3 = led2(mc, Win{W_LOAD, 2, 1, 30.0, 0.0}, mr, TM);
+      CHECK(o3.b == 0.85f);
+      mc.mirror = 2;                                                        // last repeat and only repeat: copy
+      Led o4 = led2(mc, Win{W_LOAD, 2, 1, 30.0, 0.0}, mr, TM);
+      CHECK(o4.c.r == TM.c.r && o4.b == TM.b);
+      Config pm; bool okm = true;
+      const char* jm = "{\"mirror\":2}"; const char* jm2 = "{\"mirror\":7}"; const char* jm3 = "{\"sets\":4}";
+      CHECK(cfgFromJson(jm, strlen(jm), pm, &okm) && pm.mirror == 2);
+      CHECK(cfgFromJson(jm2, strlen(jm2), pm, &okm) && pm.mirror == 2);
+      Config pn; CHECK(cfgFromJson(jm3, strlen(jm3), pn, &okm) && pn.mirror == 0);
+    }
     Config pj; bool ok3 = true;
     const char* jt = "{\"trackRepeats\":true,\"loadSec\":5000,\"profiles\":{\"load\":{\"final\":500,\"longCycle\":0,\"longDim\":99,\"markEvery\":5}}}";
     CHECK(cfgFromJson(jt, strlen(jt), pj, &ok3) && pj.trackRepeats && pj.loadSec == 1200.f && pj.load.finalSec == 120.f && pj.load.longCycle == 2.f &&
